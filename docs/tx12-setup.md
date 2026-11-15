@@ -36,11 +36,11 @@ The manual says advanced mode is not available on black-and-white radios with le
 
 ## 5. Check what the radio sends
 
-Chrome lists the controller only after one of its sticks or switches has moved since the page loaded. Wiggle a stick first.
+Chrome lists the controller only after one of its sticks or switches has moved since the page loaded. Wiggle a stick first. On an Android tablet, an axis may also read 0 until that stick or switch itself first moves; the setup wizard does not count that jump as movement (*to confirm on the device*).
 
 - **Raw view:** in the project folder run `npm run dev`, then open `http://localhost:5173/dev/input.html` in Chrome (Vite prints the actual address). It shows the controller's name, every axis as a bar with its value and every button as a lamp, and, once the wizard has run, what the game makes of it. Flip each switch: with the Game model, axes 4–7 should jump.
 - **Windows:** press Win+R, run `joy.cpl`, select the radio and open **Properties** to see the axes and buttons move.
 
 ## 6. Run the controller setup in the game
 
-The wizard runs on the first start. To run it again, press the controller button in the top-left corner of the title screen. It asks for the left stick up and down, the right stick left and right, then up and down, then the Arm switch, and finally shows everything live. On that last screen, Backspace throws the result away and starts again; Escape leaves the setup at any step. The mapping is stored in the browser, so it survives a reload; it is per browser and per site address.
+The wizard runs on the first start. To run it again, press the controller button in the top-left corner of the title screen. It asks for the left stick all the way up and held there, then all the way down and held there; then the right stick left and right, then up and down, each time back to the middle; then the Arm switch. The last screen draws the result on the transmitter and follows the real controls live: the left stick drives a bar with a flame (it must rise when the stick goes up), the right stick moves a dot in a square, and a lamp next to the switch lights when armed. Below are two big buttons: the green tick accepts (flipping the Arm switch accepts too), the round arrow throws the result away and starts again. The small button under the flame bar swaps the throttle's top and bottom, for a throttle that reads upside down. The X in the top-right corner leaves the setup at any step; on a keyboard, Escape does the same and Backspace on the last screen starts again. The mapping is stored in the browser, so it survives a reload; it is per browser and per site address.

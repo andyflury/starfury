@@ -5,7 +5,7 @@ import { runSetupWizard } from '../src/ui/setupWizard.ts';
 
 // Raw view of the controller plus the mapped input. `?fake` replaces the Gamepad API with a scripted TX12 that performs
 // each wizard step by itself (TAER order, inverted reduced-endpoint throttle, inverted elevator, SA on axis 4);
-// `?wizard` starts the wizard on load.
+// `?fake=android` makes its axes read 0 until they first move; `?wizard` starts the wizard on load.
 
 const params = new URLSearchParams(location.search);
 if (params.has('fake')) installFakePad();
@@ -14,14 +14,14 @@ const el = <T extends HTMLElement>(id: string): T => document.getElementById(id)
 const input = createInput();
 const caption = el('caption');
 
-/** A voice that shows the line as a caption and ends after 1.5 s. */
+/** A voice that shows the line as a caption and ends after `?voiceMs` milliseconds (default 1500). */
 const voice: Voice = (() => {
   let end: (() => void) | undefined;
   const say = (id: LineId): Promise<void> => {
     end?.();
     caption.textContent = `voice: ${lines[id].de}`;
     return new Promise((resolve) => {
-      const timer = setTimeout(() => done(), 1500);
+      const timer = setTimeout(() => done(), Number(params.get('voiceMs') ?? 1500));
       const done = (): void => {
         clearTimeout(timer);
         if (end === done) end = undefined;
@@ -88,15 +88,23 @@ const render = (): void => {
 };
 render();
 
-/** Replaces `navigator.getGamepads` with a scripted TX12 that appears after 2.5 s and acts out each wizard step. */
+/**
+ * Replaces `navigator.getGamepads` with a scripted TX12 that appears after 2.5 s and acts out each wizard step `?go` seconds (default 4.5) after the step starts. With
+ * `?fake=android` every axis reads 0 until its value first changes. On the confirmation step it holds still; set
+ * `fakeAxes[i]` from the console to pose it.
+ */
 function installFakePad(): void {
   const axes = [0.8, 0, 0, 0, -1, -1, -1, -1];
-  const pad = { id: 'Fake TX12 Joystick (Vendor: 1209 Product: 4f54)', index: 0, connected: true, mapping: '', timestamp: 0, axes, buttons: [] };
+  const initial = [...axes];
+  const live = axes.map(() => params.get('fake') !== 'android');
+  const pad = { id: 'Fake TX12 Joystick (Vendor: 1209 Product: 4f54)', index: 0, connected: true, mapping: '', timestamp: 0, axes: [...axes], buttons: [] };
+  Object.assign(window, { fakeAxes: axes });
   const appearAt = performance.now() + 2500;
+  const go = Number(params.get('go') ?? 4.5);
   let step: string | undefined;
   let stepStart = 0;
   const ease = (a: number, b: number, from: number, to: number, t: number): number | undefined =>
-    t < from || t > to ? undefined : a + (b - a) * Math.sin(((t - from) / (to - from)) * Math.PI * 0.5);
+    t < from ? undefined : a + (b - a) * Math.sin(Math.min(1, (t - from) / (to - from)) * Math.PI * 0.5);
   const tick = (now: number): void => {
     requestAnimationFrame(tick);
     const s = document.querySelector<HTMLElement>('.sw')?.dataset.step;
@@ -108,26 +116,21 @@ function installFakePad(): void {
     const set = (i: number, v: number | undefined): void => {
       if (v !== undefined) axes[i] = v;
     };
-    axes[3] = Math.sin(now / 170) * 0.03;
-    if (step === 'throttle') {
-      set(0, ease(0.8, -0.8, 2.5, 3.2, t));
-      set(0, ease(-0.8, 0.8, 3.4, 4.1, t));
-    } else if (step === 'x') {
-      set(1, ease(0, -1, 2.5, 2.9, t));
-      set(1, ease(-1, 1, 3.0, 3.6, t));
-      set(1, ease(1, 0, 3.7, 4.0, t));
+    if (step === 'throttle_up') set(0, ease(0.8, -0.8, go, go + 0.7, t));
+    else if (step === 'throttle_down') set(0, ease(-0.8, 0.8, go, go + 0.7, t));
+    else if (step === 'x') {
+      set(1, ease(0, -1, go, go + 0.4, t));
+      set(1, ease(-1, 1, go + 0.5, go + 1.1, t));
+      set(1, ease(1, 0, go + 1.2, go + 1.5, t));
     } else if (step === 'y') {
-      set(2, ease(0, -1, 2.5, 2.9, t));
-      set(2, ease(-1, 1, 3.0, 3.6, t));
-      set(2, ease(1, 0, 3.7, 4.0, t));
-    } else if (step === 'arm') {
-      if (t > 2.5) axes[4] = 1;
-    } else if (step === 'done') {
-      set(0, ease(0.8, -0.3, 0.5, 1.5, t));
-      set(1, ease(0, 0.6, 0.5, 1.2, t));
-      set(2, ease(0, -0.5, 0.5, 1.2, t));
-      if (t > 4.5) axes[4] = -1;
-    }
+      set(2, ease(0, -1, go, go + 0.4, t));
+      set(2, ease(-1, 1, go + 0.5, go + 1.1, t));
+      set(2, ease(1, 0, go + 1.2, go + 1.5, t));
+    } else if (step === 'arm' && t > go) axes[4] = 1;
+    axes.forEach((v, i) => {
+      if (v !== initial[i]) live[i] = true;
+      pad.axes[i] = live[i] ? v : 0;
+    });
   };
   requestAnimationFrame(tick);
   Object.defineProperty(navigator, 'getGamepads', {

@@ -38,7 +38,7 @@ const columnsFor = (n: number): number => (n <= 4 ? n : Math.ceil(n / 2));
 
 /**
  * Mounts the picker in `overlay` with the highlight on `selected`; speaks `picker_prompt` on opening and again after
- * a stretch without input.
+ * a stretch without input. Its home button calls `home`.
  */
 export function showPicker(
   overlay: HTMLElement,
@@ -47,6 +47,7 @@ export function showPicker(
   landing: PickerLanding | undefined,
   voice: Voice,
   sfx: Sfx,
+  home: () => void,
 ): Picker {
   const root = el('div', 'screen picker', overlay);
   const grid = el('div', 'picker-grid', root);
@@ -112,12 +113,16 @@ export function showPicker(
   };
   window.addEventListener('keydown', onKey);
   nodes.forEach((n, i) => {
-    n.tile.addEventListener('pointerdown', (e) => {
-      e.stopPropagation();
+    n.tile.addEventListener('pointerdown', (e) => e.stopPropagation());
+    n.tile.addEventListener('click', () => {
       idle = 0;
       start(i);
     });
   });
+  const homeButton = el('button', 'corner-button corner-left', root);
+  homeButton.innerHTML = ICONS.home;
+  homeButton.addEventListener('pointerdown', (e) => e.stopPropagation());
+  homeButton.addEventListener('click', home);
 
   void voice.say('picker_prompt');
 

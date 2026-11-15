@@ -54,7 +54,7 @@ function standInImage(color = '#e08a3c'): string {
 }
 
 if (view === 'title') {
-  const t = showTitle(overlay);
+  const t = showTitle(overlay, () => console.log('unlock'));
   void t.pressed.then((choice) => {
     console.log('title', JSON.stringify(choice));
     t.launch();
@@ -92,7 +92,7 @@ if (view === 'title') {
   ];
   const [landId, landStars, unlocks] = (params.get('land') ?? '').split(':');
   const landing = landId ? { id: landId, stars: Number(landStars) as Stars, unlocks: unlocks || undefined } : undefined;
-  const picker = showPicker(overlay, tiles, params.get('sel') ?? 'mission', landing, voice, sfx);
+  const picker = showPicker(overlay, tiles, params.get('sel') ?? 'mission', landing, voice, sfx, () => console.log('home'));
   void picker.chosen.then((id) => console.log('chosen', id));
   const input = createInput();
   let last = performance.now();

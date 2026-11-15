@@ -3,7 +3,8 @@ import {
   applyMapping,
   createArmDetector,
   createStickDetector,
-  createThrottleDetector,
+  createThrottleBottomDetector,
+  createThrottleTopDetector,
   loadMapping,
   saveMapping,
   type Detector,
@@ -21,6 +22,8 @@ class Script {
   private t = 0;
   private seed = 1;
   private noise = new Map<number, number>();
+  /** Axes that report 0 until their value first changes, with the value they started at. */
+  private stale = new Map<number, number>();
 
   constructor(axes: number[], buttons = 0) {
     this.axes = [...axes];
@@ -30,6 +33,12 @@ class Script {
   /** Adds ± `amplitude` jitter to `axis` on every frame from now on. */
   jitter(axis: number, amplitude: number): this {
     this.noise.set(axis, amplitude);
+    return this;
+  }
+
+  /** Makes the given axes report 0 until their value first changes from what it is now, as Chrome on Android does. */
+  staleUntilMoved(...axes: number[]): this {
+    for (const a of axes) this.stale.set(a, this.axes[a] ?? 0);
     return this;
   }
 
@@ -68,6 +77,10 @@ class Script {
 
   private emit(): void {
     const axes = this.axes.map((v, i) => v + (this.noise.has(i) ? (this.rand() * 2 - 1) * (this.noise.get(i) ?? 0) : 0));
+    for (const [a, v0] of this.stale) {
+      if (axes[a] === v0) axes[a] = 0;
+      else this.stale.delete(a);
+    }
     this.frames.push({ raw: { id: 'TX12 Joystick', axes, buttons: [...this.buttons] }, t: this.t });
     this.t += FRAME;
   }
@@ -90,79 +103,126 @@ const AETR = { x: 0, y: 1, throttle: 2 };
 const TAER = { throttle: 0, x: 1, y: 2 };
 const rest = (throttleAxis: number): number[] => [0, 0, 0, 0, -1, -1, -1, -1].map((v, i) => (i === throttleAxis ? -1 : v));
 
+/** Runs the throttle's top step until it completes, then the bottom step on the frames after it. */
+function detectThrottle(script: Script, exclude: number[] = []): { axis: number; top: number; bottom: number } | undefined {
+  const top = run(createThrottleTopDetector(exclude), script);
+  if (!top.result) return undefined;
+  const { axis, top: topValue } = top.result;
+  const rest = new Script([]);
+  rest.frames.push(...script.frames.slice(top.at + 1));
+  const bottom = run(createThrottleBottomDetector(axis, topValue), rest).result;
+  return bottom === undefined ? undefined : { axis, top: topValue, bottom };
+}
+
+/** Up, hold at the top, down, hold at the bottom: what the two throttle prompts ask for. */
+const upDown = (s: Script, axis: number, top: number, bottom: number, pause = 600): Script =>
+  s.move({ [axis]: top }, 500).hold(pause).move({ [axis]: bottom }, 500).hold(600);
+
 describe('throttle detector', () => {
   it('finds the throttle in AETR order', () => {
-    const s = new Script(rest(AETR.throttle)).hold(200).move({ 2: 1 }, 500).move({ 2: -1 }, 500).hold(500);
-    expect(run(createThrottleDetector([]), s).result).toEqual({ axis: 2, bottom: -1, top: 1 });
+    const s = upDown(new Script(rest(AETR.throttle)).hold(200), AETR.throttle, 1, -1);
+    expect(detectThrottle(s)).toEqual({ axis: 2, top: 1, bottom: -1 });
   });
 
   it('finds the throttle in TAER order', () => {
-    const s = new Script(rest(TAER.throttle)).hold(200).move({ 0: 1 }, 500).move({ 0: -1 }, 500).hold(500);
-    expect(run(createThrottleDetector([]), s).result).toEqual({ axis: 0, bottom: -1, top: 1 });
+    const s = upDown(new Script(rest(TAER.throttle)).hold(200), TAER.throttle, 1, -1);
+    expect(detectThrottle(s)).toEqual({ axis: 0, top: 1, bottom: -1 });
   });
 
   it('records an inverted throttle', () => {
-    const s = new Script([0, 0, 1, 0]).hold(200).move({ 2: -1 }, 500).move({ 2: 1 }, 500).hold(500);
-    expect(run(createThrottleDetector([]), s).result).toEqual({ axis: 2, bottom: 1, top: -1 });
+    const s = upDown(new Script([0, 0, 1, 0]).hold(200), 2, -1, 1);
+    expect(detectThrottle(s)).toEqual({ axis: 2, top: -1, bottom: 1 });
   });
 
   it('records reduced endpoints', () => {
-    const s = new Script([0, 0, -0.8, 0]).hold(200).move({ 2: 0.8 }, 500).move({ 2: -0.8 }, 500).hold(500);
-    const r = run(createThrottleDetector([]), s).result;
+    const r = detectThrottle(upDown(new Script([0, 0, -0.8, 0]).hold(200), 2, 0.8, -0.8));
     expect(r?.axis).toBe(2);
-    expect(r?.bottom).toBeCloseTo(-0.8);
     expect(r?.top).toBeCloseTo(0.8);
+    expect(r?.bottom).toBeCloseTo(-0.8);
   });
 
-  it('starts from the middle and goes up then down', () => {
-    const s = new Script([0, 0, 0, 0]).move({ 2: 1 }, 300).move({ 2: -1 }, 600).hold(500);
-    expect(run(createThrottleDetector([]), s).result).toEqual({ axis: 2, bottom: -1, top: 1 });
+  it('starts from the middle', () => {
+    expect(detectThrottle(upDown(new Script([0, 0, 0, 0]), 2, 1, -1))).toEqual({ axis: 2, top: 1, bottom: -1 });
   });
 
-  it('starting at the top, waits for a full up-and-down after the first move down', () => {
-    const s = new Script([0, 0, 1, 0]).move({ 2: -1 }, 400).hold(1000).move({ 2: 1 }, 400).move({ 2: -1 }, 400).hold(500);
-    expect(run(createThrottleDetector([]), s).result).toEqual({ axis: 2, bottom: -1, top: 1 });
+  it('starts at the top: moved down and straight back up, then down', () => {
+    const s = new Script([0, 0, 1, 0]).hold(500).move({ 2: -1 }, 500).move({ 2: 1 }, 500).hold(600).move({ 2: -1 }, 500).hold(600);
+    expect(detectThrottle(s)).toEqual({ axis: 2, top: 1, bottom: -1 });
   });
 
-  it('does not complete while paused at the top of the first excursion', () => {
-    const s = new Script(rest(2)).move({ 2: 1 }, 400).hold(1000);
-    expect(run(createThrottleDetector([]), s).result).toBeUndefined();
+  it('a long pause at the top never ends the step', () => {
+    const det = createThrottleTopDetector([]);
+    const s = new Script(rest(2)).move({ 2: 1 }, 500).hold(8000);
+    const top = run(det, s);
+    expect(top.result).toEqual({ axis: 2, top: 1 });
+    const bottom = createThrottleBottomDetector(2, 1);
+    const rest2 = new Script([]);
+    rest2.frames.push(...s.frames.slice(top.at + 1));
+    expect(run(bottom, rest2).result).toBeUndefined();
   });
 
-  it('needs the stop at the end to last 0.4 s', () => {
-    const det = createThrottleDetector([]);
-    const s = new Script(rest(2)).move({ 2: 1 }, 400).move({ 2: -1 }, 400);
-    const atBottom = s.frames.length;
-    s.hold(600);
-    const { at } = run(det, s);
-    expect((at - atBottom + 1) * FRAME).toBeGreaterThanOrEqual(400);
-    expect((at - atBottom) * FRAME).toBeLessThan(450);
+  it('the top needs a steady hold of 0.4 s', () => {
+    const s = new Script(rest(2)).move({ 2: 1 }, 500);
+    const arrived = s.frames.length;
+    s.hold(800);
+    const { at } = run(createThrottleTopDetector([]), s);
+    expect((at - arrived + 1) * FRAME).toBeGreaterThanOrEqual(400);
+    expect((at - arrived) * FRAME).toBeLessThan(450);
+  });
+
+  it('the bottom must be at least MIN_RANGE from the top', () => {
+    const s = new Script(rest(2)).move({ 2: 1 }, 500).hold(600).move({ 2: 0 }, 300).hold(1500);
+    expect(detectThrottle(s)).toBeUndefined();
+  });
+
+  it('Android: an axis reading 0 until it moves, at the bottom', () => {
+    const s = upDown(new Script(rest(2)).staleUntilMoved(0, 1, 2, 3, 4, 5, 6, 7).hold(500), 2, 1, -1);
+    expect(s.frames[0]?.raw.axes[2]).toBe(0);
+    expect(detectThrottle(s)).toEqual({ axis: 2, top: 1, bottom: -1 });
+  });
+
+  it('Android: an inverted throttle reading 0 until it moves, with a long pause at the top', () => {
+    const s = upDown(new Script([0, 0, 1, 0, -1]).staleUntilMoved(0, 1, 2, 3, 4).hold(500), 2, -1, 1, 4000);
+    expect(detectThrottle(s)).toEqual({ axis: 2, top: -1, bottom: 1 });
+  });
+
+  it('Android: starting in the middle and at the top', () => {
+    expect(detectThrottle(upDown(new Script([0, 0, 0.1, 0]).staleUntilMoved(2), 2, 1, -1))).toEqual({ axis: 2, top: 1, bottom: -1 });
+    const s = new Script([0, 0, 1, 0]).staleUntilMoved(2).hold(300).move({ 2: -1 }, 500).move({ 2: 1 }, 500).hold(600).move({ 2: -1 }, 500).hold(600);
+    expect(detectThrottle(s)).toEqual({ axis: 2, top: 1, bottom: -1 });
+  });
+
+  it('Android: a second stale axis jumping during the step is not travel', () => {
+    const s = new Script(rest(2)).staleUntilMoved(2, 5, 6).hold(300).move({ 2: 1 }, 500);
+    s.set({ 5: -0.98 }).set({ 6: 1 }).hold(600).move({ 2: -1 }, 500).hold(600);
+    expect(detectThrottle(s)).toEqual({ axis: 2, top: 1, bottom: -1 });
   });
 
   it('ignores a noisy unrelated axis', () => {
-    const s = new Script(rest(2)).jitter(5, 0.12).jitter(3, 0.1).hold(300).move({ 2: 1 }, 500).move({ 2: -1 }, 500).hold(500);
-    const det = createThrottleDetector([]);
-    expect(run(det, s).result).toEqual({ axis: 2, bottom: -1, top: 1 });
+    const s = upDown(new Script(rest(2)).jitter(5, 0.12).jitter(3, 0.1).hold(300), 2, 1, -1);
+    expect(detectThrottle(s)).toEqual({ axis: 2, top: 1, bottom: -1 });
   });
 
   it('noise alone never makes a candidate', () => {
     const s = new Script(rest(2)).jitter(0, 0.14).jitter(5, 0.14).hold(3000);
-    const det = createThrottleDetector([]);
+    const det = createThrottleTopDetector([]);
     run(det, s);
     expect(det.candidate).toBeUndefined();
   });
 
-  it('prefers the right stick over a slight wiggle of the wrong one', () => {
+  it('prefers the throttle over a slight wiggle of the wrong stick', () => {
     const s = new Script(rest(2)).move({ 0: 0.25 }, 150).move({ 0: -0.25 }, 300).move({ 0: 0 }, 150).move({ 1: 0.5 }, 150).move({ 1: 0 }, 150);
-    s.move({ 2: 1 }, 500).move({ 2: -1 }, 500).hold(500);
-    expect(run(createThrottleDetector([]), s).result).toEqual({ axis: 2, bottom: -1, top: 1 });
+    expect(detectThrottle(upDown(s, 2, 1, -1))).toEqual({ axis: 2, top: 1, bottom: -1 });
   });
 
-  it('shows the candidate moving up as positive', () => {
-    const det = createThrottleDetector([]);
-    run(det, new Script(rest(2)).move({ 2: 0.6 }, 300));
+  it('shows the candidate rising as it travels up and falling as it travels down', () => {
+    const det = createThrottleTopDetector([]);
+    run(det, new Script(rest(2)).move({ 2: 0 }, 300));
     expect(det.candidate?.axis).toBe(2);
-    expect(det.candidate?.display).toBeCloseTo(0.6);
+    expect(det.candidate?.display).toBeGreaterThan(-0.2);
+    const down = createThrottleBottomDetector(2, 1);
+    run(down, new Script(rest(2)).set({ 2: 0.5 }));
+    expect(down.candidate?.display).toBeCloseTo(0.5);
   });
 });
 
@@ -208,6 +268,22 @@ describe('stick detector', () => {
     const s = new Script(rest(AETR.throttle)).move({ 1: 0.2 }, 100).move({ 1: -0.2 }, 200).move({ 1: 0 }, 100).move({ 3: 0.6 }, 200).move({ 3: 0 }, 200);
     s.move({ 0: -1 }, 300).move({ 0: 1 }, 500).move({ 0: 0 }, 300).hold(400);
     expect(run(createStickDetector([AETR.throttle], 'negative'), s).result?.axis).toBe(0);
+  });
+
+  it('Android: a stale stick with an off-centre rest takes its rest from where it settles', () => {
+    const s = new Script([0.06, 0, -1, 0, -1]).staleUntilMoved(0, 1, 2, 3, 4).hold(300);
+    s.move({ 0: -1 }, 300).move({ 0: 1 }, 500).move({ 0: 0.06 }, 300).hold(400);
+    expect(s.frames[0]?.raw.axes[0]).toBe(0);
+    const r = run(createStickDetector([2], 'negative'), s).result;
+    expect(r?.axis).toBe(0);
+    expect(r?.rest).toBeCloseTo(0.06);
+    expect(r?.negative).toBe(-1);
+    expect(r?.positive).toBe(1);
+  });
+
+  it('a pause at an end does not complete', () => {
+    const s = new Script([0, 0, -1, 0]).move({ 0: -1 }, 300).move({ 0: 1 }, 500).hold(800).move({ 0: -1 }, 600).hold(800);
+    expect(run(createStickDetector([2], 'negative'), s).result).toBeUndefined();
   });
 
   it('ignores a noisy unrelated axis', () => {
@@ -257,6 +333,19 @@ describe('arm detector', () => {
 
   it('ignores a button tap shorter than 0.25 s', () => {
     const s = new Script(rest(AETR.throttle), 4).hold(200).set({}, { 1: true }).hold(150).set({}, { 1: false }).hold(600);
+    expect(run(createArmDetector(assigned), s).result).toBeUndefined();
+  });
+
+  it('Android: a stale switch axis jumping from 0 when first flipped is the flip', () => {
+    const up = new Script(rest(AETR.throttle)).staleUntilMoved(4, 5, 6, 7).hold(300).set({ 5: 1 }).hold(400);
+    expect(up.frames[0]?.raw.axes[5]).toBe(0);
+    expect(run(createArmDetector(assigned), up).result).toEqual({ kind: 'axis', axis: 5, armed: 1 });
+    const down = new Script([0, 0, -1, 0, 1, 1]).staleUntilMoved(4, 5).hold(300).set({ 4: -1 }).hold(400);
+    expect(run(createArmDetector(assigned), down).result).toEqual({ kind: 'axis', axis: 4, armed: -1 });
+  });
+
+  it('Android: a stale stick axis reporting its real position near 0 is not a flip', () => {
+    const s = new Script([0, 0, -1, 0.02, -1]).staleUntilMoved(3, 4).hold(300).move({ 3: 0.05 }, 200).hold(600);
     expect(run(createArmDetector(assigned), s).result).toBeUndefined();
   });
 

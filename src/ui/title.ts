@@ -11,14 +11,17 @@ export interface TitleChoice {
 
 /** The title screen over the orbiting 3D scene. */
 export interface TitleScreen extends Screen {
-  /** Resolves on the first key press, start-button press or corner-button press. */
+  /** Resolves on the first key press or a click of the start button or the setup or name corner button. */
   readonly pressed: Promise<TitleChoice>;
   /** Swaps the start button for its launch animation while the welcome line plays. */
   launch(): void;
 }
 
-/** Mounts the title screen in `overlay`; its flag button switches the voice language without starting. */
-export function showTitle(overlay: HTMLElement): TitleScreen {
+/**
+ * Mounts the title screen in `overlay`; the start press calls `unlock` from inside the user's gesture. Its flag button
+ * switches the voice language without starting.
+ */
+export function showTitle(overlay: HTMLElement, unlock: () => void): TitleScreen {
   const root = el('div', 'screen title', overlay);
   svgBox('title-logo', wordmarkSvg(), root);
   const start = el('button', 'title-start', root);
@@ -29,8 +32,7 @@ export function showTitle(overlay: HTMLElement): TitleScreen {
   nameButton.innerHTML = ICONS.nameTag;
   const languageButton = el('button', 'corner-button corner-bottom-left language-button', root);
   languageButton.innerHTML = flagSvg(currentLanguage());
-  languageButton.addEventListener('pointerdown', (e) => {
-    e.stopPropagation();
+  languageButton.addEventListener('click', () => {
     const next = currentLanguage() === 'de' ? 'en' : 'de';
     setLanguage(next);
     languageButton.innerHTML = flagSvg(next);
@@ -40,21 +42,20 @@ export function showTitle(overlay: HTMLElement): TitleScreen {
   const pressed = new Promise<TitleChoice>((r) => {
     resolve = r;
   });
+  /** Resolves the press, calls `unlock`, then asks for fullscreen; runs inside the press's event handler, never reorder. */
   const finish = (choice: TitleChoice): void => {
     window.removeEventListener('keydown', onKey);
+    unlock();
+    document.documentElement.requestFullscreen?.().catch(() => {});
     resolve(choice);
   };
   const onKey = (e: KeyboardEvent): void => {
     if (e.key !== 'Escape') finish({ setup: false, name: false });
   };
-  const onPress = (choice: TitleChoice) => (e: PointerEvent): void => {
-    e.stopPropagation();
-    finish(choice);
-  };
   window.addEventListener('keydown', onKey);
-  start.addEventListener('pointerdown', onPress({ setup: false, name: false }));
-  setupButton.addEventListener('pointerdown', onPress({ setup: true, name: false }));
-  nameButton.addEventListener('pointerdown', onPress({ setup: false, name: true }));
+  start.addEventListener('click', () => finish({ setup: false, name: false }));
+  setupButton.addEventListener('click', () => finish({ setup: true, name: false }));
+  nameButton.addEventListener('click', () => finish({ setup: false, name: true }));
 
   return {
     pressed,

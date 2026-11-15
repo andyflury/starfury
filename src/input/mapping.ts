@@ -44,9 +44,14 @@ export const DEAD_ZONE = 0.05;
 /** An Arm axis reads as armed while within this of its armed value. */
 export const ARM_TOLERANCE = 0.4;
 
-const THROTTLE_HOLD = { within: 0.1, ms: 400 };
-const STICK_REST_HOLD = { within: 0.15, ms: 300 };
+/** A hold counts while the axis stays within this of where the hold began. */
 const STEADY = 0.1;
+const THROTTLE_HOLD_MS = 400;
+/** The throttle's travel must span at least this before its top can be taken. */
+const TOP_TRAVEL = 0.5;
+const STICK_HOLD_MS = 300;
+/** A stick's rest must lie within this of the middle of its range. */
+const REST_CENTRE = 0.25;
 const ARM_JUMP = 0.5;
 const ARM_HOLD_MS = 250;
 const ARM_STEADY = 0.2;
@@ -101,7 +106,7 @@ export function saveMapping(mapping: Mapping | undefined): void {
   save('mapping', mapping);
 }
 
-/** The axis a detection step is currently following; `display` is −1…+1 with +1 in the prompt's first direction. */
+/** The axis a detection step is currently following; `display` is −1…+1 with +1 in the prompt's direction. */
 export interface AxisCandidate {
   axis: number;
   display: number;
@@ -113,127 +118,148 @@ export interface Detector<T> {
   readonly candidate: AxisCandidate | undefined;
 }
 
-/** Per-axis travel since the baseline: range, side of the first departure and the number of reversals. */
+/** An axis's values since it first reported something other than its value at the start of the step. */
 interface Travel {
-  base: number;
   min: number;
   max: number;
-  /** Sign of the first departure of at least JITTER from the baseline; 0 before it. */
-  first: number;
-  /** Direction of the current excursion; 0 before the first departure. */
-  dir: number;
-  peak: number;
-  turns: number;
-}
-
-function newTravel(base: number): Travel {
-  return { base, min: base, max: base, first: 0, dir: 0, peak: base, turns: 0 };
-}
-
-function advance(tr: Travel, v: number): void {
-  tr.min = Math.min(tr.min, v);
-  tr.max = Math.max(tr.max, v);
-  if (tr.dir === 0) {
-    if (Math.abs(v - tr.base) >= JITTER) tr.first = tr.dir = Math.sign(v - tr.base);
-    tr.peak = v;
-  } else if ((v - tr.peak) * tr.dir > 0) {
-    tr.peak = v;
-  } else if ((tr.peak - v) * tr.dir >= JITTER) {
-    tr.dir = -tr.dir;
-    tr.peak = v;
-    tr.turns += 1;
-  }
+  values: number[];
 }
 
 /**
- * Follows every unassigned axis and picks the one with the largest range (at least JITTER) as the candidate.
- * `settled` decides, per sample, whether the candidate is in its completion pose; it must hold there, steady within STEADY, for `holdMs`.
+ * Follows every axis not in `exclude`. An axis starts travelling at its first sample that differs from its value in
+ * the step's first snapshot, so a jump away from a stale initial value is never counted as movement.
  */
-function createAxisStep<T>(
-  exclude: readonly number[],
-  holdMs: number,
-  settled: (tr: Travel, v: number) => boolean,
-  finish: (tr: Travel, axis: number, v: number) => T,
-  display: (tr: Travel, v: number) => number,
-): Detector<T> {
-  let travels: (Travel | undefined)[] | undefined;
-  let candidate: AxisCandidate | undefined;
+function createTravels(exclude: readonly number[]): { update(raw: RawSnapshot): void; widest(): { axis: number; tr: Travel; v: number } | undefined } {
+  let initial: number[] | undefined;
+  const travels: (Travel | undefined)[] = [];
+  return {
+    update(raw) {
+      initial ??= [...raw.axes];
+      raw.axes.forEach((v, i) => {
+        if (exclude.includes(i)) return;
+        const tr = travels[i];
+        if (tr) {
+          tr.min = Math.min(tr.min, v);
+          tr.max = Math.max(tr.max, v);
+          tr.values.push(v);
+        } else if (v !== initial?.[i]) travels[i] = { min: v, max: v, values: [v] };
+      });
+    },
+    widest() {
+      let best: { axis: number; tr: Travel; v: number } | undefined;
+      travels.forEach((tr, axis) => {
+        if (!tr || tr.max - tr.min < JITTER || (best && tr.max - tr.min <= best.tr.max - best.tr.min)) return;
+        best = { axis, tr, v: tr.values[tr.values.length - 1] ?? tr.min };
+      });
+      return best;
+    },
+  };
+}
+
+/** Returns a check that is true once `ok` has held for `ms` on one axis while the value stayed within STEADY. */
+function createHold(ms: number): (axis: number | undefined, v: number, ok: boolean, t: number) => boolean {
   let held: { axis: number; since: number; value: number } | undefined;
-  let result: T | undefined;
+  return (axis, v, ok, t) => {
+    if (axis === undefined || !ok) {
+      held = undefined;
+      return false;
+    }
+    if (held?.axis !== axis || Math.abs(v - held.value) > STEADY) held = { axis, since: t, value: v };
+    return t - held.since >= ms;
+  };
+}
+
+/**
+ * Detects the throttle's top: the unassigned axis with the widest travel (at least 0.5), held steady for 0.4 s at an
+ * end of that travel. The held value is the top.
+ */
+export function createThrottleTopDetector(exclude: readonly number[]): Detector<{ axis: number; top: number }> {
+  const travels = createTravels(exclude);
+  const hold = createHold(THROTTLE_HOLD_MS);
+  let candidate: AxisCandidate | undefined;
+  let result: { axis: number; top: number } | undefined;
+  return {
+    get candidate() {
+      return candidate;
+    },
+    push(raw, t) {
+      if (result) return result;
+      travels.update(raw);
+      const w = travels.widest();
+      const start = w?.tr.values[0] ?? 0;
+      candidate = w && { axis: w.axis, display: clamp(-1 + Math.abs(w.v - start), -1, 1) };
+      const atEnd = w !== undefined && w.tr.max - w.tr.min >= TOP_TRAVEL && (Math.abs(w.v - w.tr.min) <= STEADY || Math.abs(w.v - w.tr.max) <= STEADY);
+      if (w && hold(w.axis, w.v, atEnd, t)) result = { axis: w.axis, top: w.v };
+      return result;
+    },
+  };
+}
+
+/** Detects the throttle's bottom on `axis`: held steady for 0.4 s at least MIN_RANGE away from `top`. */
+export function createThrottleBottomDetector(axis: number, top: number): Detector<number> {
+  const hold = createHold(THROTTLE_HOLD_MS);
+  let candidate: AxisCandidate | undefined;
+  let result: number | undefined;
   return {
     get candidate() {
       return candidate;
     },
     push(raw, t) {
       if (result !== undefined) return result;
-      travels ??= raw.axes.map((v, i) => (exclude.includes(i) ? undefined : newTravel(v)));
-      let best: { axis: number; tr: Travel; v: number } | undefined;
-      raw.axes.forEach((v, i) => {
-        const tr = travels?.[i];
-        if (!tr) return;
-        advance(tr, v);
-        const range = tr.max - tr.min;
-        if (range >= JITTER && (!best || range > best.tr.max - best.tr.min)) best = { axis: i, tr, v };
-      });
-      if (!best) {
-        candidate = held = undefined;
-        return undefined;
-      }
-      const { axis, tr, v } = best;
-      candidate = { axis, display: clamp(display(tr, v), -1, 1) };
-      if (tr.max - tr.min < MIN_RANGE || !settled(tr, v)) {
-        held = undefined;
-        return undefined;
-      }
-      if (held?.axis !== axis || Math.abs(v - held.value) > STEADY) held = { axis, since: t, value: v };
-      if (t - held.since >= holdMs) result = finish(tr, axis, v);
+      const v = raw.axes[axis];
+      if (v === undefined) return undefined;
+      candidate = { axis, display: clamp(1 - Math.abs(v - top), -1, 1) };
+      if (hold(axis, v, Math.abs(v - top) >= MIN_RANGE, t)) result = v;
       return result;
     },
   };
 }
 
 /**
- * Detects the throttle: moved to both ends and held at the end it stops at, after at least one reversal.
- * The end it is held at is the bottom; the other end is the top.
- */
-export function createThrottleDetector(exclude: readonly number[]): Detector<ThrottleMapping> {
-  const nearEnd = (tr: Travel, v: number): number | undefined =>
-    Math.abs(v - tr.min) <= THROTTLE_HOLD.within ? tr.min : Math.abs(v - tr.max) <= THROTTLE_HOLD.within ? tr.max : undefined;
-  return createAxisStep(
-    exclude,
-    THROTTLE_HOLD.ms,
-    (tr, v) => tr.turns >= 1 && nearEnd(tr, v) !== undefined,
-    (tr, axis, v) => {
-      const bottom = nearEnd(tr, v) ?? v;
-      return { axis, bottom, top: bottom === tr.min ? tr.max : tr.min };
-    },
-    (tr, v) => (tr.first || 1) * v,
-  );
-}
-
-/**
- * Detects a right-stick axis: moved to both sides of its baseline and back to within 0.15 of it.
- * `firstEnd` names which end the prompt asks for first (left is negative, up is positive).
+ * Detects a right-stick axis: the unassigned axis with the widest travel (at least MIN_RANGE), back and held steady
+ * for 0.3 s near the middle of its range with travel of at least JITTER on both sides. The held value is the rest;
+ * the side first left from it is the end the prompt names first (`firstEnd`: left is negative, up is positive).
  */
 export function createStickDetector(exclude: readonly number[], firstEnd: 'negative' | 'positive'): Detector<StickMapping> {
-  return createAxisStep(
-    exclude,
-    STICK_REST_HOLD.ms,
-    (tr, v) => tr.min <= tr.base - JITTER && tr.max >= tr.base + JITTER && Math.abs(v - tr.base) <= STICK_REST_HOLD.within,
-    (tr, axis) => {
-      const firstValue = tr.first > 0 ? tr.max : tr.min;
-      const secondValue = tr.first > 0 ? tr.min : tr.max;
-      return firstEnd === 'negative'
-        ? { axis, rest: tr.base, negative: firstValue, positive: secondValue }
-        : { axis, rest: tr.base, negative: secondValue, positive: firstValue };
+  const travels = createTravels(exclude);
+  const hold = createHold(STICK_HOLD_MS);
+  let candidate: AxisCandidate | undefined;
+  let result: StickMapping | undefined;
+  return {
+    get candidate() {
+      return candidate;
     },
-    (tr, v) => (tr.first || 1) * (v - tr.base),
-  );
+    push(raw, t) {
+      if (result) return result;
+      travels.update(raw);
+      const w = travels.widest();
+      if (!w) {
+        candidate = undefined;
+        hold(undefined, 0, false, t);
+        return undefined;
+      }
+      const { axis, tr, v } = w;
+      const start = tr.values[0] ?? v;
+      const away = tr.values.find((x) => Math.abs(x - start) >= JITTER) ?? v;
+      candidate = { axis, display: clamp(Math.sign(away - start) * (v - start), -1, 1) };
+      const ok = tr.max - tr.min >= MIN_RANGE && v - tr.min >= JITTER && tr.max - v >= JITTER && Math.abs(v - (tr.min + tr.max) / 2) <= REST_CENTRE;
+      if (!hold(axis, v, ok, t)) return undefined;
+      const first = Math.sign((tr.values.find((x) => Math.abs(x - v) >= JITTER) ?? v) - v);
+      const firstValue = first > 0 ? tr.max : tr.min;
+      const secondValue = first > 0 ? tr.min : tr.max;
+      result =
+        firstEnd === 'negative'
+          ? { axis, rest: v, negative: firstValue, positive: secondValue }
+          : { axis, rest: v, negative: secondValue, positive: firstValue };
+      return result;
+    },
+  };
 }
 
 /**
- * Detects the Arm switch: the first unassigned axis that jumps at least 0.5 from its baseline and holds steady there,
- * or the first button that changes state and holds, each for 0.25 s. The position after the flip means armed.
+ * Detects the Arm switch: the first unassigned axis that jumps at least 0.5 from its value in the step's first
+ * snapshot and holds steady there, or the first button that changes state and holds, each for 0.25 s. A jump from a
+ * stale initial value is a flip. The position after the flip means armed.
  */
 export function createArmDetector(exclude: readonly number[]): Detector<ArmMapping> {
   let base: RawSnapshot | undefined;

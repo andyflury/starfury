@@ -174,13 +174,13 @@ export function createShell(ctx: ShellContext): { frame(dt: number): void } {
     debug.step = 'title';
     world.resetToPad();
     scenery = orbit;
-    const title = mount(showTitle(overlay));
+    const title = mount(showTitle(overlay, () => void audio.unlock()));
     const choice = await guard(title.pressed);
     title.launch();
     const language = currentLanguage();
     if (language !== loadedLanguage) {
       loadedLanguage = language;
-      loading = audio.unlock().then(() => voice.load(language));
+      loading = voice.load(language);
     }
     await guard(loading);
     await guard(voice.say('welcome'));
@@ -212,7 +212,7 @@ export function createShell(ctx: ShellContext): { frame(dt: number): void } {
       { id: MISSION_TILE, image: image('stage_mission'), stars: undefined, locked: false },
       ...STAGES.map((s) => ({ id: s.id, image: image(`stage_${s.id}`), stars: best[s.id] ?? 0, locked: locked.has(s.id) })),
     ];
-    const screen = mount(showPicker(overlay, tiles, lastPlayed, landing, voice, sfx));
+    const screen = mount(showPicker(overlay, tiles, lastPlayed, landing, voice, sfx, toTitle));
     input.flush();
     scenery = (dt) => {
       orbit(dt);
@@ -339,10 +339,14 @@ export function createShell(ctx: ShellContext): { frame(dt: number): void } {
     unmount(screen);
   }
 
-  window.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape' || debug.step === 'title') return;
+  /** Abandons whatever runs and shows the title. */
+  function toTitle(): void {
     abort();
     begin();
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && debug.step !== 'title') toTitle();
   });
   begin();
 

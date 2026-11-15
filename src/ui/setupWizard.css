@@ -6,6 +6,7 @@
   --sw-amber: #ffb41f;
   --sw-green: #3dff86;
   --sw-dim: #2a3444;
+  --sw-red: #ff3b2f;
   position: absolute;
   inset: 0;
   z-index: 20;
@@ -50,6 +51,7 @@
 .sw-stage {
   position: relative;
   display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
   place-items: center;
   width: 100%;
   min-height: 0;
@@ -57,8 +59,9 @@
 
 /* transmitter */
 .sw-tx {
-  width: min(94vw, 118vh);
-  max-height: 84vh;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
 }
 .sw-body {
   fill: var(--sw-body);
@@ -190,20 +193,20 @@ path.sw-arrow {
 }
 
 /* highlighted control per step */
-.sw[data-step='throttle'] .sw-gimbal-l,
+.sw:is([data-step='throttle_up'], [data-step='throttle_down']) .sw-gimbal-l,
 .sw[data-step='x'] .sw-gimbal-r,
 .sw[data-step='y'] .sw-gimbal-r,
 .sw[data-step='arm'] .sw-arm,
 .sw[data-step='connect'] .sw-port {
   filter: drop-shadow(0 0 14px var(--sw-cyan));
 }
-.sw[data-step='throttle'] .sw-gimbal-l .sw-ring,
+.sw:is([data-step='throttle_up'], [data-step='throttle_down']) .sw-gimbal-l .sw-ring,
 .sw[data-step='x'] .sw-gimbal-r .sw-ring,
 .sw[data-step='y'] .sw-gimbal-r .sw-ring {
   stroke: var(--sw-cyan);
   animation: sw-pulse 1.2s ease-in-out infinite;
 }
-.sw[data-step='throttle'] .sw-gimbal-l .sw-knob,
+.sw:is([data-step='throttle_up'], [data-step='throttle_down']) .sw-gimbal-l .sw-knob,
 .sw[data-step='x'] .sw-gimbal-r .sw-knob,
 .sw[data-step='y'] .sw-gimbal-r .sw-knob,
 .sw[data-step='arm'] .sw-arm .sw-lever circle {
@@ -217,7 +220,8 @@ path.sw-arrow {
 .sw[data-step='connect'] .sw-port {
   stroke: var(--sw-cyan);
 }
-.sw[data-step='throttle'] :is(.sw-a-l1, .sw-a-l2),
+.sw[data-step='throttle_up'] .sw-a-l1,
+.sw[data-step='throttle_down'] .sw-a-l2,
 .sw[data-step='x'] :is(.sw-a-x1, .sw-a-x2),
 .sw[data-step='y'] :is(.sw-a-y1, .sw-a-y2),
 .sw[data-step='arm'] .sw-a-flip {
@@ -243,81 +247,8 @@ path.sw-arrow {
   }
 }
 
-/* confirmation: live inputs */
-.sw-live {
-  display: none;
-  grid-template-columns: auto auto auto;
-  align-items: center;
-  gap: 7vh;
-}
-.sw[data-step='done'] .sw-live {
-  display: grid;
-}
-.sw[data-step='done'] .sw-tx {
-  display: none;
-}
-.sw-gauge {
-  position: relative;
-  border: 0.8vh solid #3d4a5e;
-  border-radius: 3vh;
-  background: #0d1118;
-  box-shadow: 0 0 4vh rgba(57, 228, 255, 0.15) inset;
-}
-.sw-throttle {
-  width: 13vh;
-  height: 56vh;
-  overflow: hidden;
-}
-.sw-throttle-fill {
-  position: absolute;
-  inset: auto 0 0 0;
-  background: linear-gradient(0deg, #ff7a1a, var(--sw-amber));
-  box-shadow: 0 0 3vh var(--sw-amber);
-}
-.sw-pad {
-  width: 56vh;
-  height: 56vh;
-}
-.sw-pad-cross {
-  position: absolute;
-  inset: 0;
-  background:
-    linear-gradient(90deg, transparent calc(50% - 0.3vh), #263041 calc(50% - 0.3vh) calc(50% + 0.3vh), transparent calc(50% + 0.3vh)),
-    linear-gradient(0deg, transparent calc(50% - 0.3vh), #263041 calc(50% - 0.3vh) calc(50% + 0.3vh), transparent calc(50% + 0.3vh));
-}
-.sw-pad-dot {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 8vh;
-  height: 8vh;
-  margin: -4vh 0 0 -4vh;
-  border-radius: 50%;
-  background: var(--sw-cyan);
-  box-shadow: 0 0 3vh var(--sw-cyan);
-}
-.sw-lamp-cell {
-  width: 30vh;
-  height: 56vh;
-  display: grid;
-  grid-template-rows: 1fr 1fr;
-  place-items: center;
-}
-.sw-lamp {
-  width: 20vh;
-  height: 20vh;
-  border-radius: 50%;
-  background: #3a1010;
-  border: 1vh solid #5a2323;
-  transition: background 0.1s, box-shadow 0.1s;
-}
-.sw-lamp.on {
-  background: #ff3b2f;
-  border-color: #ffb4ae;
-  box-shadow: 0 0 6vh #ff3b2f;
-}
 .sw-flip-hint {
-  width: 22vh;
+  width: 12vh;
   visibility: hidden;
 }
 .sw-hint .sw-flip-hint {
@@ -343,6 +274,171 @@ path.sw-arrow {
   100% {
     transform: rotate(-28deg);
   }
+}
+
+/* confirmation: the mapping drawn on the transmitter */
+.sw-map,
+.sw-actions {
+  display: none;
+}
+.sw[data-step='done'] .sw-map {
+  display: inline;
+}
+.sw[data-step='done'] .sw-actions {
+  display: flex;
+}
+.sw[data-step='done'] .sw-gimbal-l .sw-ring {
+  stroke: var(--sw-amber);
+}
+.sw[data-step='done'] .sw-gimbal-l .sw-knob {
+  fill: var(--sw-amber);
+}
+.sw[data-step='done'] .sw-gimbal-r .sw-ring,
+.sw[data-step='done'] .sw-gimbal-r .sw-knob {
+  stroke: var(--sw-cyan);
+}
+.sw[data-step='done'] .sw-gimbal-r .sw-knob {
+  fill: var(--sw-cyan);
+}
+.sw[data-step='done'] .sw-arm .sw-lever circle {
+  fill: var(--sw-red);
+}
+.sw[data-step='done'] .sw-arm .sw-toggle-base {
+  stroke: var(--sw-red);
+}
+.sw-link {
+  fill: none;
+  stroke-width: 6;
+  stroke-dasharray: 4 14;
+  stroke-linecap: round;
+}
+.sw-link-throttle {
+  stroke: var(--sw-amber);
+}
+.sw-link-steer {
+  stroke: var(--sw-cyan);
+}
+.sw-link-arm {
+  stroke: var(--sw-red);
+}
+.sw-bar,
+.sw-pad {
+  fill: #0d1118;
+  stroke: #3d4a5e;
+  stroke-width: 6;
+}
+.sw-bar-fill {
+  fill: var(--sw-amber);
+  filter: drop-shadow(0 0 10px var(--sw-amber));
+}
+.sw-flame {
+  fill: #ff7a1a;
+  filter: drop-shadow(0 0 10px #ff7a1a);
+}
+.sw-flame-core {
+  fill: #ffe066;
+}
+.sw-pad-cross {
+  stroke: #263041;
+  stroke-width: 4;
+}
+.sw-pad-dot {
+  fill: var(--sw-cyan);
+  filter: drop-shadow(0 0 10px var(--sw-cyan));
+}
+.sw-wheel {
+  fill: none;
+  stroke: var(--sw-cyan);
+  stroke-width: 9;
+  stroke-linecap: round;
+}
+.sw-lamp {
+  fill: #3a1010;
+  stroke: #5a2323;
+  stroke-width: 6;
+}
+.sw-lamp.on {
+  fill: var(--sw-red);
+  stroke: #ffb4ae;
+  filter: drop-shadow(0 0 16px var(--sw-red));
+}
+.sw-button {
+  cursor: pointer;
+}
+.sw-swap circle {
+  fill: #2a2110;
+  stroke: var(--sw-amber);
+  stroke-width: 6;
+}
+.sw-swap path {
+  fill: none;
+  stroke: var(--sw-amber);
+  stroke-width: 7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* touch buttons */
+.sw-actions {
+  align-items: center;
+  gap: 6vh;
+  padding: 1vh 0 3vh;
+}
+.sw-actions button,
+.sw-close {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.sw-actions button svg,
+.sw-close svg {
+  width: 70%;
+  height: 70%;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.sw-accept {
+  width: 15vh;
+  height: 15vh;
+  background: #0b3a1e;
+  border: 1vh solid var(--sw-green);
+  box-shadow: 0 0 4vh rgba(61, 255, 134, 0.5);
+}
+.sw-accept svg {
+  stroke: var(--sw-green);
+  stroke-width: 14;
+}
+.sw-redo {
+  width: 11vh;
+  height: 11vh;
+  background: #2a2110;
+  border: 0.8vh solid var(--sw-amber);
+}
+.sw-redo svg {
+  stroke: var(--sw-amber);
+  stroke-width: 11;
+}
+.sw-redo polygon {
+  fill: var(--sw-amber);
+  stroke: none;
+}
+.sw-close {
+  position: absolute;
+  top: 2.5vh;
+  right: 2.5vh;
+  width: 7vh;
+  height: 7vh;
+  background: #1a1f28;
+  border: 0.5vh solid #56657c;
+  z-index: 2;
+}
+.sw-close svg {
+  stroke: #c3ccd9;
+  stroke-width: 12;
 }
 
 /* completed step */

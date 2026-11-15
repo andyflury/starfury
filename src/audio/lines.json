@@ -1,7 +1,7 @@
 {
   "welcome": {"tone": "calm", "de": "Willkommen bei StarFury, Flugdirektor! Heute fliegen wir ins All.", "en": "Welcome to StarFury, Flight Director! Today we fly to space."},
   "setup_connect": {"tone": "prompt", "de": "Schliesse die Fernsteuerung mit dem Kabel an und bewege einen Hebel.", "en": "Plug the remote control in with the cable and move a stick."},
-  "setup_throttle": {"tone": "prompt", "de": "Bewege den linken Hebel ganz nach oben und ganz nach unten.", "en": "Move the left stick all the way up and all the way down."},
+  "setup_throttle_up": {"tone": "prompt", "de": "Schiebe den linken Hebel ganz nach oben.", "en": "Push the left stick all the way up."},
   "setup_right_x": {"tone": "prompt", "de": "Bewege den rechten Hebel nach links und rechts.", "en": "Move the right stick left and right."},
   "setup_right_y": {"tone": "prompt", "de": "Bewege den rechten Hebel nach oben und unten.", "en": "Move the right stick up and down."},
   "setup_arm": {"tone": "prompt", "de": "Lege den Schalter um, mit dem du die Triebwerke scharf schaltest.", "en": "Flip the switch you want to arm the engines with."},

@@ -12,15 +12,28 @@ export interface NameEntry extends Screen {
   readonly done: Promise<string>;
 }
 
-/** Mounts the name entry in `overlay`, prefilled with `initial`. */
+/**
+ * Mounts the name entry in `overlay`, prefilled with `initial`. An invisible text input over the letter tiles takes
+ * the typing, so a tap on the tiles brings up the on-screen keyboard; the tiles show the letters accepted.
+ */
 export function showNameEntry(overlay: HTMLElement, initial: string): NameEntry {
   const root = el('div', 'screen name-entry', overlay);
   const panel = el('div', 'panel name-panel', root);
   svgBox('name-keyboard', ICONS.keyboard, panel);
-  const field = el('div', 'name-field', panel);
-  const enter = svgBox('name-enter', ICONS.enter, panel);
+  const box = el('div', 'name-box', panel);
+  const field = el('div', 'name-field', box);
+  const input = el('input', 'name-input', box);
+  input.type = 'text';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.enterKeyHint = 'done';
+  input.setAttribute('autocapitalize', 'characters');
+  input.setAttribute('autocorrect', 'off');
+  input.setAttribute('aria-label', 'name');
+  const accept = el('button', 'name-enter', panel);
+  accept.innerHTML = ICONS.enter;
 
-  let name = initial.toUpperCase().slice(0, NAME_MAX);
+  let name = '';
   const render = (popLast: boolean): void => {
     field.replaceChildren();
     [...name].forEach((c, i) => {
@@ -29,38 +42,56 @@ export function showNameEntry(overlay: HTMLElement, initial: string): NameEntry 
       if (popLast && i === name.length - 1) tile.classList.add('pop');
     });
     if (name.length < NAME_MAX) el('div', 'name-tile name-cursor', field);
-    enter.classList.toggle('ready', name.length > 0);
+    accept.classList.toggle('ready', name.length > 0);
   };
+  /** Keeps only the allowed letters in the input, leaving it untouched when nothing was dropped. */
+  const take = (): void => {
+    const kept = [...input.value].filter((c) => LETTER.test(c)).slice(0, NAME_MAX).join('');
+    if (kept !== input.value) input.value = kept;
+    const grew = kept.length > name.length;
+    name = kept.toUpperCase();
+    render(grew);
+  };
+  input.value = initial;
+  take();
   render(false);
 
   let resolve: (name: string) => void = () => {};
   const done = new Promise<string>((r) => {
     resolve = r;
   });
-  const onKey = (e: KeyboardEvent): void => {
-    if (e.key === 'Backspace') {
-      e.preventDefault();
-      name = name.slice(0, -1);
-      render(false);
-    } else if (e.key === 'Enter') {
-      if (name.length === 0) {
-        replay(field, 'shake');
-        return;
-      }
-      window.removeEventListener('keydown', onKey);
-      root.classList.add('confirmed');
-      resolve(name);
-    } else if (LETTER.test(e.key) && name.length < NAME_MAX) {
-      name += e.key.toUpperCase();
-      render(true);
+  let confirmed = false;
+  const confirm = (): void => {
+    if (confirmed) return;
+    if (name.length === 0) {
+      replay(field, 'shake');
+      input.focus();
+      return;
     }
+    confirmed = true;
+    input.blur();
+    root.classList.add('confirmed');
+    resolve(name);
   };
-  window.addEventListener('keydown', onKey);
+  input.addEventListener('input', take);
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    confirm();
+  });
+  accept.addEventListener('pointerdown', (e) => e.preventDefault());
+  accept.addEventListener('click', confirm);
+  root.addEventListener('pointerdown', (e) => {
+    if (e.target !== input && e.target !== accept && !accept.contains(e.target as Node)) {
+      e.preventDefault();
+      input.focus();
+    }
+  });
+  input.focus();
 
   return {
     done,
     dispose() {
-      window.removeEventListener('keydown', onKey);
       root.remove();
     },
   };
