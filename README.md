@@ -1,5 +1,7 @@
 # StarFury
 
+**Play it: <https://andyflury.github.io/starfury/>**
+
 A browser 3D rocket game for a child who cannot read yet, flown with a Radiomaster TX12 RC transmitter and guided by a mission-controller voice in German or American English. The mission has seven stages in flight order (Liftoff, Max-Q ascent, Hot staging, Booster catch, Starlink deploy, Re-entry, Ship catch) with fact cards and a cutscene between them and a mission patch with stars at the end; a stage picker lets him play the whole mission or any stage he has reached.
 
 ## Run
@@ -9,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` in Chrome. The title screen needs one key or pointer press, which also unlocks audio. It is not deployed anywhere.
+Open `http://localhost:5173` in Chrome. The title screen needs one key or pointer press, which also unlocks audio. Every push to `main` builds the game and deploys it to GitHub Pages (`.github/workflows/pages.yml`).
 
 ## Controls
 
