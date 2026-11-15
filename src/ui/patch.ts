@@ -17,8 +17,10 @@ const NAVY = '#0a1230';
 const FONT = `900 64px 'Arial Black', 'Segoe UI Black', Impact, sans-serif`;
 
 const STAR_FIRST = 1.0;
-const STAR_GAP = 0.55;
 const STAR_POP = 0.35;
+const STAR_SPAN = (76 * Math.PI) / 180;
+const STAR_STEP_MAX = (12 * Math.PI) / 180;
+const ONE_ROW_MAX = 9;
 
 function circle(r: number): Path2D {
   const p = new Path2D();
@@ -272,7 +274,7 @@ interface Ribbon {
 }
 
 const RIB_HALF = 470;
-const RIB_TOP = CY + 150;
+const RIB_TOP = CY + 140;
 const RIB_SAG = 34;
 const RIB_H = 86;
 
@@ -396,10 +398,20 @@ function drawBase(ctx: CanvasRenderingContext2D, name: string): void {
   drawRibbon(ctx, name);
 }
 
-function starAngles(max: number): number[] {
-  const step = Math.min((12 * Math.PI) / 180, (100 * Math.PI) / 180 / Math.max(1, max));
-  const start = Math.PI / 2 + (step * (max - 1)) / 2;
-  return Array.from({ length: max }, (_, i) => start - i * step);
+/** Star places along the bottom of the band, left to right: one row up to nine stars, two staggered rows above. */
+function starSlots(max: number): { slots: Array<{ x: number; y: number }>; r: number } {
+  const rows = max > ONE_ROW_MAX ? [{ r: 413, n: Math.ceil(max / 2) }, { r: 369, n: Math.floor(max / 2) }] : [{ r: TEXT_R, n: max }];
+  const widest = rows[0]?.n ?? 0;
+  const step = Math.min(STAR_STEP_MAX, STAR_SPAN / Math.max(1, widest - 1));
+  const slots = rows.flatMap((row) =>
+    Array.from({ length: row.n }, (_, i) => {
+      const a = Math.PI / 2 + (step * (row.n - 1)) / 2 - i * step;
+      return { x: CX + Math.cos(a) * row.r, y: CY + Math.sin(a) * row.r };
+    }),
+  );
+  slots.sort((p, q) => p.x - q.x);
+  const r = rows.length > 1 ? Math.min(22, step * 369 * 0.5) : Math.min(36, step * TEXT_R * 0.46);
+  return { slots, r };
 }
 
 const easeOutBack = (t: number): number => {
@@ -449,10 +461,10 @@ export function showPatch(overlay: HTMLElement, name: string, stars: number, max
   const hint = el('div', 'panel patch-hint', root);
   createControllerHint(hint, 'flip');
 
-  const angles = starAngles(max);
-  const starR = Math.min(38, ((angles.length > 1 ? Math.abs((angles[0] ?? 0) - (angles[1] ?? 0)) : 0.3) * TEXT_R) * 0.48);
+  const { slots, r: starR } = starSlots(max);
+  const gap = max > ONE_ROW_MAX ? 0.28 : 0.55;
   const earned = Math.min(stars, max);
-  const lastLanding = STAR_FIRST + (earned - 1) * STAR_GAP;
+  const lastLanding = STAR_FIRST + (earned - 1) * gap;
   let time = 0;
   let played = 0;
   let resolveLanded: () => void = () => {};
@@ -463,10 +475,8 @@ export function showPatch(overlay: HTMLElement, name: string, stars: number, max
   const draw = (): void => {
     ctx.clearRect(0, 0, W, H);
     ctx.drawImage(base, 0, 0);
-    angles.forEach((a, i) => {
-      const x = CX + Math.cos(a) * TEXT_R;
-      const y = CY + Math.sin(a) * TEXT_R;
-      const since = time - (STAR_FIRST + i * STAR_GAP);
+    slots.forEach(({ x, y }, i) => {
+      const since = time - (STAR_FIRST + i * gap);
       const filled = i < earned && since >= 0;
       const path = starPath(starR);
       ctx.save();
@@ -519,7 +529,7 @@ export function showPatch(overlay: HTMLElement, name: string, stars: number, max
     landed,
     update(dt) {
       time += dt;
-      while (played < earned && time >= STAR_FIRST + played * STAR_GAP) {
+      while (played < earned && time >= STAR_FIRST + played * gap) {
         played++;
         sfx.star();
       }

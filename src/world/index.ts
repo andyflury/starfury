@@ -15,7 +15,7 @@ export function configureRenderer(renderer: WebGLRenderer): void {
   renderer.shadowMap.type = PCFShadowMap;
 }
 
-/** Builds Starbase with the stacked rocket on the mount, adds it to the scene and sets the scene's sky, fog, sun and environment. */
+/** Builds Starbase, the orbit scene and the stacked rocket on the mount, adds them to the scene and sets the scene's sky, fog, sun and environment. */
 export function createWorld(scene: Scene): World {
   const booster = createBooster();
   const ship = createShip();
@@ -36,10 +36,26 @@ export function createWorld(scene: Scene): World {
       v.setEnginesLit(0);
     }
     tower.setChopsticks(0);
+    tower.setArmHeight(0);
+    ship.setPayloadDoor(0);
+    ship.setFlaps(0, 0);
+    base.setEnvironment('site');
+    base.setSkyAltitude(0);
   };
   resetToPad();
 
-  return { root, tower, booster, ship, padPoint, mountRadius: MOUNT_RADIUS, resetToPad, update: base.update };
+  return {
+    root,
+    tower,
+    booster,
+    ship,
+    padPoint,
+    mountRadius: MOUNT_RADIUS,
+    resetToPad,
+    setEnvironment: base.setEnvironment,
+    setSkyAltitude: base.setSkyAltitude,
+    update: base.update,
+  };
 }
 
 /** Builds the exhaust, pad steam, explosion and camera-shake effects and adds their meshes to the scene. */

@@ -1,7 +1,7 @@
 import { PerspectiveCamera, Scene, Vector3, WebGLRenderer } from 'three';
 import { createAudio } from '../src/audio/index.ts';
 import { createLiftoffStage } from '../src/stages/liftoff.ts';
-import { createTransition } from '../src/stages/transition.ts';
+import { createBoostback } from '../src/stages/boostback.ts';
 import type { App, Input, InputState, Stage } from '../src/types.ts';
 import { createHud } from '../src/ui/hud.ts';
 import '../src/ui/styles.css';
@@ -24,7 +24,7 @@ const state: InputState = { throttle: 0, stickX: 0, stickY: 0, armed: false };
 const input: Input = { poll() {}, state, confirm: false, flush() {}, source: 'keyboard', mapped: false };
 const app: App = { scene, camera, world, effects, input, voice: audio.voice, sfx: audio.sfx, hud, overlay };
 
-const factories = { liftoff: createLiftoffStage, transition: createTransition };
+const factories = { liftoff: createLiftoffStage, boostback: createBoostback };
 let stage: Stage | undefined;
 let time = 0;
 

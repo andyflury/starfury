@@ -11,8 +11,9 @@ interface Bar {
   band: HTMLElement;
 }
 
-function createBar(parent: HTMLElement, side: 'left' | 'right', icon: string): Bar {
-  const root = el('div', `hud-item hud-glass hud-bar hud-bar-${side}`, parent);
+function createBar(parent: HTMLElement, kind: 'throttle' | 'fuel' | 'heat' | 'pressure', icon: string): Bar {
+  const side = kind === 'throttle' ? 'left' : 'right';
+  const root = el('div', `hud-item hud-glass hud-bar hud-bar-${side} hud-bar-${kind}`, parent);
   const track = el('div', 'hud-bar-track', root);
   const band = el('div', 'hud-bar-band', track);
   band.style.display = 'none';
@@ -22,20 +23,34 @@ function createBar(parent: HTMLElement, side: 'left' | 'right', icon: string): B
   return { root, fill, band };
 }
 
-const TILT_ARC = 'M20 110 A90 90 0 0 1 200 110';
-
-/** Point on the tilt dial at `deg` from upright, ±90 at the ends of the arc. */
-function dialPoint(deg: number, r: number): string {
-  const a = (deg * Math.PI) / 180;
-  return `${(110 + r * Math.sin(a)).toFixed(1)} ${(110 - r * Math.cos(a)).toFixed(1)}`;
-}
+/** Radius of the level's dial in its SVG units; the rim stands for `edge` degrees. */
+const DIAL_R = 88;
+const DOT_R = 13;
+const TILT_EDGE = 30;
+/** Fraction of `edge` from which the dot turns red and pulses. */
+const TILT_RIM = 0.8;
 
 /** Creates the stage HUD inside `parent`; every element starts hidden. */
 export function createHud(parent: HTMLElement): Hud {
   const root = el('div', 'hud', parent);
+  const show = (node: HTMLElement, on: boolean): void => {
+    node.classList.toggle('on', on);
+  };
 
-  const throttle = createBar(root, 'left', ICONS.flame);
-  const fuel = createBar(root, 'right', ICONS.fuel);
+  const throttle = createBar(root, 'throttle', ICONS.flame);
+  const fuel = createBar(root, 'fuel', ICONS.fuel);
+  const heat = createBar(root, 'heat', ICONS.thermometer);
+  const pressure = createBar(root, 'pressure', ICONS.pressure);
+
+  /** Shows a right-hand bar at `level`, amber while `warn` holds and red and pulsing while `critical` holds. */
+  const setLevel = (bar: Bar, level: number | undefined, warn: (v: number) => boolean, critical: (v: number) => boolean): void => {
+    show(bar.root, level !== undefined);
+    if (level === undefined) return;
+    const v = clamp01(level);
+    bar.fill.style.height = `${v * 100}%`;
+    bar.root.classList.toggle('warn', warn(v) && !critical(v));
+    bar.root.classList.toggle('critical', critical(v));
+  };
 
   const speed = el('div', 'hud-item hud-glass hud-speed', root);
   speed.innerHTML = `<div class="hud-speed-arrow">${ICONS.downArrow}</div>
@@ -44,52 +59,79 @@ export function createHud(parent: HTMLElement): Hud {
   const countdown = el('div', 'hud-item hud-countdown', root);
   const digit = el('div', 'hud-countdown-digit', countdown);
 
-  const tilt = svgBox('hud-item hud-tilt', '', root);
-  const renderTiltDial = (limit: number | undefined): number => {
-    const range = limit === undefined ? 45 : limit * 1.5;
-    const safe = limit === undefined ? 10 : limit * 0.5;
-    const zone = (from: number, to: number): string => {
-      const s = dialPoint((from / range) * 90, 90);
-      const e = dialPoint((to / range) * 90, 90);
-      return `<path class="tilt-zone" d="M${s} A90 90 0 0 ${to > from ? 1 : 0} ${e}"/>`;
-    };
-    const zones = limit === undefined ? '' : zone(limit, range) + zone(-limit, -range);
-    tilt.innerHTML = `<svg viewBox="0 0 220 140" aria-hidden="true">
-      <path class="tilt-track" d="${TILT_ARC}"/>${zones}
-      <path class="tilt-safe" d="M${dialPoint((-safe / range) * 90, 90)} A90 90 0 0 1 ${dialPoint((safe / range) * 90, 90)}"/>
-      <g class="tilt-needle"><line x1="110" y1="110" x2="110" y2="30"/><circle cx="110" cy="110" r="11"/></g>
-    </svg>`;
-    return range;
-  };
-  let tiltRange = renderTiltDial(undefined);
-  let tiltLimit: number | undefined;
+  const tilt = svgBox(
+    'hud-item hud-tilt',
+    `<svg viewBox="-100 -100 200 200" aria-hidden="true">
+      <defs><radialGradient id="tilt-shade" cx="0" cy="0" r="${DIAL_R}" gradientUnits="userSpaceOnUse">
+        <stop class="tilt-stop-safe" offset="0.33" stop-color="#ffc21f" stop-opacity="0.8"/>
+        <stop class="tilt-stop-mid" offset="0.7" stop-color="#ff8a1a" stop-opacity="0.9"/>
+        <stop offset="1" stop-color="#ff3d5a" stop-opacity="0.95"/>
+      </radialGradient></defs>
+      <circle class="tilt-dial" r="${DIAL_R}" fill="url(#tilt-shade)"/>
+      <circle class="tilt-safe" r="29"/>
+      <path class="tilt-cross" d="M-12 0 H12 M0 -12 V12"/>
+      <g class="tilt-dot"><circle class="tilt-halo" r="${DOT_R * 1.9}"/><circle class="tilt-ring" r="${DOT_R + 4}"/><circle class="tilt-core" r="${DOT_R}"/></g>
+    </svg>`,
+    root,
+  );
+  const safeDisc = tilt.querySelector('.tilt-safe');
+  const safeStop = tilt.querySelector('.tilt-stop-safe');
+  const midStop = tilt.querySelector('.tilt-stop-mid');
+  const dot = tilt.querySelector('.tilt-dot');
+  let tiltZones = '';
 
   const hintBox = el('div', 'hud-item hud-hint', root);
   const hint = createControllerHint(hintBox, 'throttle-up');
 
-  const show = (node: HTMLElement, on: boolean): void => {
-    node.classList.toggle('on', on);
-  };
+  const pips = el('div', 'hud-item hud-pips', root);
+  let pipsLit = 0;
+
   let lastDigit: number | undefined;
   let lastHint: HintIcon | undefined;
 
   const hud: Hud = {
-    setThrottle(level, bandFrom) {
+    setThrottle(level, bandFrom, bandTo) {
       show(throttle.root, level !== undefined);
       if (level === undefined) return;
       const v = clamp01(level);
+      const to = clamp01(bandTo ?? 1);
       throttle.fill.style.height = `${v * 100}%`;
       throttle.band.style.display = bandFrom === undefined ? 'none' : '';
-      if (bandFrom !== undefined) throttle.band.style.height = `${(1 - clamp01(bandFrom)) * 100}%`;
-      throttle.root.classList.toggle('in-band', bandFrom !== undefined && v >= bandFrom);
+      if (bandFrom !== undefined) {
+        throttle.band.style.top = `${(1 - to) * 100}%`;
+        throttle.band.style.height = `${(to - clamp01(bandFrom)) * 100}%`;
+        throttle.band.classList.toggle('closed', to < 1);
+      }
+      throttle.root.classList.toggle('in-band', bandFrom !== undefined && v >= bandFrom && v <= to);
     },
     setFuel(level) {
-      show(fuel.root, level !== undefined);
-      if (level === undefined) return;
-      const v = clamp01(level);
-      fuel.fill.style.height = `${v * 100}%`;
-      fuel.root.classList.toggle('fuel-low', v < 0.4 && v >= 0.2);
-      fuel.root.classList.toggle('fuel-critical', v < 0.2);
+      setLevel(fuel, level, (v) => v < 0.4, (v) => v < 0.2);
+    },
+    setHeat(level) {
+      setLevel(heat, level, (v) => v >= 0.6, (v) => v >= 0.8);
+    },
+    setPressure(level, redFrom) {
+      const red = clamp01(redFrom ?? 0.8);
+      setLevel(pressure, level, (v) => v >= red - 0.2, (v) => v >= red);
+      pressure.band.style.display = redFrom === undefined ? 'none' : '';
+      pressure.band.style.top = '0';
+      pressure.band.style.height = `${(1 - red) * 100}%`;
+    },
+    setPips(filled, total) {
+      show(pips, filled !== undefined);
+      if (filled === undefined) return;
+      const n = Math.max(0, Math.round(total ?? pips.childElementCount));
+      if (pips.childElementCount !== n) {
+        pips.replaceChildren();
+        for (let i = 0; i < n; i++) el('div', 'pip', pips);
+        pipsLit = 0;
+      }
+      const lit = Math.max(0, Math.min(n, Math.round(filled)));
+      [...pips.children].forEach((pip, i) => {
+        pip.classList.toggle('lit', i < lit);
+        if (i >= pipsLit && i < lit) replay(pip, 'pop');
+      });
+      pipsLit = lit;
     },
     setSpeedLight(light: SpeedLight | undefined) {
       show(speed, light !== undefined);
@@ -105,16 +147,27 @@ export function createHud(parent: HTMLElement): Hud {
       digit.textContent = String(n);
       replay(digit, 'pop');
     },
-    setTilt(degrees, limit) {
-      show(tilt, degrees !== undefined);
-      if (degrees === undefined) return;
-      if (limit !== tiltLimit) {
-        tiltLimit = limit;
-        tiltRange = renderTiltDial(limit);
+    setTilt(right, away, safe, edge) {
+      show(tilt, right !== undefined);
+      if (right === undefined) return;
+      const rim = edge ?? TILT_EDGE;
+      const green = safe ?? rim / 3;
+      const zones = `${green}/${rim}`;
+      if (zones !== tiltZones) {
+        tiltZones = zones;
+        const f = Math.min(1, green / rim);
+        safeDisc?.setAttribute('r', (f * DIAL_R).toFixed(1));
+        safeStop?.setAttribute('offset', f.toFixed(3));
+        midStop?.setAttribute('offset', (f + (1 - f) * 0.6).toFixed(3));
       }
-      const a = Math.max(-1, Math.min(1, degrees / tiltRange)) * 90;
-      tilt.style.setProperty('--tilt', `${a}deg`);
-      tilt.classList.toggle('tilt-danger', limit !== undefined && Math.abs(degrees) >= limit * 0.8);
+      const x = right;
+      const y = away ?? 0;
+      const mag = Math.hypot(x, y);
+      const reach = DIAL_R - DOT_R;
+      const k = mag === 0 ? 0 : Math.min(mag / rim, 1) * (reach / mag);
+      dot?.setAttribute('transform', `translate(${(x * k).toFixed(2)} ${(-y * k).toFixed(2)})`);
+      const state = mag <= green ? 'safe' : mag < rim * TILT_RIM ? 'warn' : 'danger';
+      if (tilt.dataset.state !== state) tilt.dataset.state = state;
     },
     setHint(icon) {
       show(hintBox, icon !== undefined);
@@ -129,6 +182,9 @@ export function createHud(parent: HTMLElement): Hud {
     clear() {
       hud.setThrottle(undefined);
       hud.setFuel(undefined);
+      hud.setHeat(undefined);
+      hud.setPressure(undefined);
+      hud.setPips(undefined);
       hud.setSpeedLight(undefined);
       hud.setCountdown(undefined);
       hud.setTilt(undefined);

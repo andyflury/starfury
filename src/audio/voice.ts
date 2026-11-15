@@ -1,4 +1,4 @@
-import type { LineId, Voice } from '../types.ts';
+import type { Language, LineId, Voice } from '../types.ts';
 import lines from './lines.json';
 
 const DUCK_LEVEL = 0.25;
@@ -15,7 +15,11 @@ interface Entry {
 
 /** Voice-line playback on `ctx` into `out`; `duck` is the gain of the effects bus, lowered while a line plays. */
 export function createVoice(ctx: BaseAudioContext, out: AudioNode, duck: AudioParam): Voice {
-  const buffers = new Map<LineId, AudioBuffer>();
+  let buffers = new Map<LineId, AudioBuffer>();
+  let requested: Language | undefined;
+  let loading = false;
+  let complete = false;
+  let latest: Promise<void> = Promise.resolve();
   const pending: Entry[] = [];
   let current: Entry | undefined;
 
@@ -77,18 +81,33 @@ export function createVoice(ctx: BaseAudioContext, out: AudioNode, duck: AudioPa
   }
 
   return {
-    async load() {
-      await Promise.all(
-        (Object.keys(lines) as LineId[]).map(async (id) => {
+    load(language) {
+      if (language === requested && (loading || complete)) return latest;
+      stop();
+      requested = language;
+      loading = true;
+      complete = false;
+      const fresh = new Map<LineId, AudioBuffer>();
+      buffers = fresh;
+      const ids = Object.keys(lines) as LineId[];
+      const run = Promise.all(
+        ids.map(async (id) => {
           try {
-            const res = await fetch(`${import.meta.env.BASE_URL}voice/de/${id}.mp3`);
+            const res = await fetch(`${import.meta.env.BASE_URL}voice/${language}/${id}.mp3`);
             if (!res.ok || !(res.headers.get('content-type') ?? '').startsWith('audio/')) throw new Error(`HTTP ${res.status}`);
-            buffers.set(id, await ctx.decodeAudioData(await res.arrayBuffer()));
+            fresh.set(id, await ctx.decodeAudioData(await res.arrayBuffer()));
           } catch (error) {
-            console.warn(`voice line ${id} not loaded: ${String(error)}`);
+            console.warn(`voice line ${language}/${id} not loaded: ${String(error)}`);
           }
         }),
-      );
+      ).then(() => {
+        if (buffers !== fresh) return latest;
+        loading = false;
+        complete = fresh.size === ids.length;
+        return undefined;
+      });
+      latest = run as Promise<void>;
+      return latest;
     },
 
     say(id) {

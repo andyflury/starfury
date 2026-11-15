@@ -14,9 +14,11 @@ import {
   MeshStandardMaterial,
   Shape,
   SRGBColorSpace,
+  RepeatWrapping,
   Vector2,
+  Vector3,
 } from 'three';
-import type { Booster, Vehicle } from '../types.ts';
+import type { Booster, Ship } from '../types.ts';
 import { CATCH_PIN_HALF, canvas2d, inward, mergeParts, part, rng, xf } from './starbase.ts';
 
 const R = 4.5;
@@ -60,7 +62,9 @@ function hullTextures(w: number, h: number, height: number, seed: number, paint:
   const map = new CanvasTexture(cc);
   map.colorSpace = SRGBColorSpace;
   map.anisotropy = 8;
+  map.wrapS = RepeatWrapping;
   const ormTex = new CanvasTexture(oc);
+  ormTex.wrapS = RepeatWrapping;
   ormTex.anisotropy = 8;
   return { map, orm: ormTex };
 }
@@ -133,23 +137,23 @@ function ring(n: number, radius: number, start: number, exitR: number, length: n
   return out;
 }
 
-/** A grid fin in its own frame: x radial outward from the hull, y up, z thickness. */
+/** A grid fin in its own frame: a horizontal lattice panel, x radial outward from the hull, z across, y its thin vertical depth. */
 function gridFinParts(): BufferGeometry[] {
   const box = new BoxGeometry(1, 1, 1);
-  const x0 = R + 0.3, x1 = R + 3.6, h = 4.2, t = 0.45;
+  const x0 = R + 0.3, x1 = R + 3.6, w = 4.2, t = 0.7, n = 6;
   const parts: BufferGeometry[] = [
-    part(box, DARK, xf((x0 + x1) / 2, h / 2, 0, 0, 0, 0, x1 - x0, 0.3, t)),
-    part(box, DARK, xf((x0 + x1) / 2, -h / 2, 0, 0, 0, 0, x1 - x0, 0.3, t)),
-    part(box, DARK, xf(x0, 0, 0, 0, 0, 0, 0.3, h, t)),
-    part(box, DARK, xf(x1, 0, 0, 0, 0, 0, 0.3, h, t)),
-    part(box, 0x55585e, xf(R - 0.1, 0, 0, 0, 0, 0, 1.0, 1.6, 1.4)),
+    part(box, DARK, xf((x0 + x1) / 2, 0, w / 2, 0, 0, 0, x1 - x0, t, 0.25)),
+    part(box, DARK, xf((x0 + x1) / 2, 0, -w / 2, 0, 0, 0, x1 - x0, t, 0.25)),
+    part(box, DARK, xf(x0, 0, 0, 0, 0, 0, 0.25, t, w)),
+    part(box, DARK, xf(x1, 0, 0, 0, 0, 0, 0.25, t, w)),
+    part(box, 0x55585e, xf(R - 0.1, 0, 0, 0, 0, 0, 1.0, 1.2, 1.6)),
   ];
-  for (let i = 1; i < 5; i++) parts.push(part(box, DARK, xf(x0 + ((x1 - x0) * i) / 5, 0, 0, 0, 0, 0, 0.12, h, t)));
-  for (let i = 1; i < 5; i++) parts.push(part(box, DARK, xf((x0 + x1) / 2, -h / 2 + (h * i) / 5, 0, 0, 0, 0, x1 - x0, 0.12, t)));
+  for (let i = 1; i < n; i++) parts.push(part(box, DARK, xf(x0 + ((x1 - x0) * i) / n, 0, 0, 0, 0, 0, 0.1, t, w)));
+  for (let i = 1; i < n; i++) parts.push(part(box, DARK, xf((x0 + x1) / 2, 0, -w / 2 + (w * i) / n, 0, 0, 0, x1 - x0, t, 0.1)));
   return parts;
 }
 
-/** Super Heavy. Grid fins on the diagonals, catch pins facing ±Z, chines on ±X. */
+/** Super Heavy. Horizontal grid fins on the diagonals, catch pins facing ±Z, chines on ±X. */
 export function createBooster(): Booster {
   const object = new Group();
   object.name = 'booster';
@@ -243,7 +247,7 @@ function paintTiles(color: CanvasRenderingContext2D, orm: CanvasRenderingContext
 
 /** Paints the StarFury wordmark, reading bottom to top, centred on the +Z side. */
 function paintWordmark(color: CanvasRenderingContext2D, circ: number): void {
-  const length = 22, centreY = 18.5;
+  const length = 20, centreY = 15;
   color.save();
   color.translate(circ / 2, centreY);
   color.rotate(Math.PI / 2);
@@ -280,63 +284,137 @@ function paintWordmark(color: CanvasRenderingContext2D, circ: number): void {
   color.restore();
 }
 
-/** A flap plate in the XY plane (x radial, thickness along z) turned by `ry` about Y, black on its -Z face and steel elsewhere. */
-function flap(root: [number, number][], tip: [number, number][], ry: number): BufferGeometry {
+const SHIP_PIN_H = 32.5;
+const SLOT_Y0 = 26.5;
+const SLOT_Y1 = 27.5;
+const SLOT_HALF = (45 * Math.PI) / 180;
+const SLOT_DEPTH = 1.1;
+const FLAP_SPREAD = (35 * Math.PI) / 180;
+const FLAP_FOLD = (85 * Math.PI) / 180;
+
+/** Sets u so that a cylinder made with `thetaStart` and `thetaLength` lines up with the hull texture, and v to height over `height`. */
+function arcUv(g: BufferGeometry, thetaStart: number, thetaLength: number, height: number): BufferGeometry {
+  const uv = g.getAttribute('uv');
+  for (let i = 0; i < uv.count; i++) uv.setX(i, (thetaStart + uv.getX(i) * thetaLength - Math.PI) / (Math.PI * 2));
+  return heightUv(g, height);
+}
+
+/** An open hull arc of radius `r` from y0 to y1 between angles `thetaStart` and `thetaStart + thetaLength` (0 facing +Z, +X positive), textured like the hull. */
+function hullArc(r: number, y0: number, y1: number, thetaStart: number, thetaLength: number, segments: number): BufferGeometry {
+  const g = new CylinderGeometry(r, r, y1 - y0, segments, 1, true, thetaStart, thetaLength).translate(0, (y0 + y1) / 2, 0);
+  return arcUv(g, thetaStart, thetaLength, SHIP_H);
+}
+
+/** The dark pocket behind the payload slot, facing inward. */
+function slotPocket(): BufferGeometry {
   const shape = new Shape();
-  const pts = [...root, ...tip.slice().reverse()];
-  const first = pts[0] ?? [0, 0];
-  shape.moveTo(first[0], first[1]);
-  for (const [x, y] of pts.slice(1)) shape.lineTo(x, y);
+  const n = 12;
+  for (let i = 0; i <= n; i++) {
+    const a = -SLOT_HALF + (2 * SLOT_HALF * i) / n;
+    if (i === 0) shape.moveTo(Math.sin(a) * (R - 0.01), Math.cos(a) * (R - 0.01));
+    else shape.lineTo(Math.sin(a) * (R - 0.01), Math.cos(a) * (R - 0.01));
+  }
+  for (let i = n; i >= 0; i--) {
+    const a = -SLOT_HALF + (2 * SLOT_HALF * i) / n;
+    shape.lineTo(Math.sin(a) * (R - SLOT_DEPTH), Math.cos(a) * (R - SLOT_DEPTH));
+  }
   shape.closePath();
-  const g = part(new ExtrudeGeometry(shape, { depth: 0.36, bevelEnabled: false, curveSegments: 1 }).translate(0, 0, -0.18), 0x9a9ea4, xf(0, 0, 0, 0, ry, 0));
+  const g = new ExtrudeGeometry(shape, { depth: SLOT_Y1 - SLOT_Y0, bevelEnabled: false, curveSegments: 1 }).rotateX(Math.PI / 2).translate(0, SLOT_Y1, 0);
+  return inward(part(g, 0x101113));
+}
+
+/** One flap on side `side` (+1 on +X, -1 on -X) hinged on the straight root from `a` to `b` ([radius, height]); its pivot sits on `a`. */
+function flapPivot(a: [number, number], b: [number, number], tip: [[number, number], [number, number]], side: number, material: MeshStandardMaterial): { pivot: Group; axis: Vector3 } {
+  const shape = new Shape();
+  shape.moveTo(a[0], a[1]);
+  shape.lineTo(b[0], b[1]);
+  shape.lineTo(tip[1][0], tip[1][1]);
+  shape.lineTo(tip[0][0], tip[0][1]);
+  shape.closePath();
+  const g = part(new ExtrudeGeometry(shape, { depth: 0.36, bevelEnabled: false, curveSegments: 1 }).translate(0, 0, -0.18), 0x9a9ea4, xf(0, 0, 0, 0, side > 0 ? 0 : Math.PI, 0));
   const nor = g.getAttribute('normal');
   const col = g.getAttribute('color');
   for (let i = 0; i < nor.count; i++) if (nor.getZ(i) < -0.5) col.setXYZ(i, 0.011, 0.012, 0.014);
-  return g;
+  g.translate(-side * a[0], -a[1], 0);
+  const mesh = new Mesh(g, material);
+  mesh.castShadow = true;
+  const pivot = new Group();
+  pivot.position.set(side * a[0], a[1], 0);
+  pivot.add(mesh);
+  return { pivot, axis: new Vector3(side * (b[0] - a[0]), b[1] - a[1], 0).normalize() };
 }
 
-/** StarFury, the ship. Heat-shield tiles on -Z, the wordmark on +Z, flaps on ±X. */
-export function createShip(): Vehicle {
+/** StarFury, the ship. Heat-shield tiles and belly on -Z, the wordmark and the payload slot on +Z, flaps on ±X, catch pins on ±Z. */
+export function createShip(): Ship {
   const object = new Group();
   object.name = 'ship';
   const tex = hullTextures(1024, 2048, SHIP_H, 9, (color, orm, circ, height) => {
     paintTiles(color, orm, circ, height);
     paintWordmark(color, circ);
   });
+  const material = hullMaterial(tex);
   const nosePts: Vector2[] = [];
   for (let i = 0; i <= 16; i++) {
     const t = i / 16;
     nosePts.push(new Vector2(Math.max(0.001, noseR(t)), BARREL_H + t * (SHIP_H - BARREL_H)));
   }
   const nose = new LatheGeometry(nosePts, 40, Math.PI);
-  const hullGeo = mergeParts([heightUv(barrel(0, BARREL_H, 40), SHIP_H), heightUv(nose, SHIP_H)].map((g) => g.toNonIndexed()));
-  const hull = new Mesh(hullGeo, hullMaterial(tex));
+  const hullGeo = mergeParts(
+    [
+      heightUv(barrel(0, SLOT_Y0, 40), SHIP_H),
+      hullArc(R, SLOT_Y0, SLOT_Y1, SLOT_HALF, Math.PI * 2 - 2 * SLOT_HALF, 30),
+      heightUv(barrel(SLOT_Y1, BARREL_H, 40), SHIP_H),
+      heightUv(nose, SHIP_H),
+    ].map((g) => g.toNonIndexed()),
+  );
+  const hull = new Mesh(hullGeo, material);
   hull.castShadow = true;
   hull.receiveShadow = true;
 
-  const fwdRoot: [number, number][] = [];
-  for (let y = 35.5; y <= 43.6; y += 2.7) fwdRoot.push([noseR((y - BARREL_H) / (SHIP_H - BARREL_H)) - 0.15, y]);
-  const fwdTip: [number, number][] = [
-    [noseR(5 / 17) + 1.9, 37.2],
-    [noseR(9 / 17) + 1.7, 42.0],
-  ];
-  const aftRoot: [number, number][] = [
-    [R - 0.1, 0.8],
-    [R - 0.1, 11.5],
-  ];
-  const aftTip: [number, number][] = [
-    [R + 2.9, 2.2],
-    [R + 2.9, 9.3],
-  ];
-  const parts: BufferGeometry[] = [part(disk(R - 0.05, 2.75, false), 0x2a2b2e), part(inward(barrel(0, 2.75, 32).scale(0.985, 1, 0.985)), 0x2f3033)];
-  for (const ry of [0, Math.PI]) {
-    parts.push(flap(fwdRoot, fwdTip, ry), flap(aftRoot, aftTip, ry));
-  }
+  const door = new Group();
+  const doorMesh = new Mesh(hullArc(R - 0.03, SLOT_Y0, SLOT_Y1, -SLOT_HALF, 2 * SLOT_HALF, 10), material);
+  door.add(doorMesh);
+
+  const box = new BoxGeometry(1, 1, 1);
+  const parts: BufferGeometry[] = [part(disk(R - 0.05, 2.75, false), 0x2a2b2e), part(inward(barrel(0, 2.75, 32).scale(0.985, 1, 0.985)), 0x2f3033), slotPocket()];
+  for (const side of [1, -1]) parts.push(part(box, STEEL, xf(0, SHIP_PIN_H, side * (R + 0.6), 0, 0, 0, 1.2, CATCH_PIN_HALF * 2, 1.6)));
   const details = new Mesh(mergeParts(parts), new MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.5 }));
   details.castShadow = true;
 
+  const flapMat = new MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.5 });
+  const noseAt = (y: number): number => noseR((y - BARREL_H) / (SHIP_H - BARREL_H)) - 0.15;
+  const flaps = { forward: [] as { pivot: Group; axis: Vector3; side: number }[], aft: [] as { pivot: Group; axis: Vector3; side: number }[] };
+  for (const side of [1, -1]) {
+    const fwd = flapPivot([noseAt(35.5), 35.5], [noseAt(43.6), 43.6], [[noseR(5 / 17) + 1.9, 37.2], [noseR(9 / 17) + 1.7, 42.0]], side, flapMat);
+    const aft = flapPivot([R - 0.1, 0.8], [R - 0.1, 11.5], [[R + 2.9, 2.2], [R + 2.9, 9.3]], side, flapMat);
+    flaps.forward.push({ ...fwd, side });
+    flaps.aft.push({ ...aft, side });
+    object.add(fwd.pivot, aft.pivot);
+  }
+  const swing = (list: { pivot: Group; axis: Vector3; side: number }[], level: number): void => {
+    const l = Math.max(-1, Math.min(1, level));
+    const angle = l >= 0 ? l * FLAP_SPREAD : l * FLAP_FOLD;
+    for (const f of list) f.pivot.quaternion.setFromAxisAngle(f.axis, f.side * angle);
+  };
+
   const engines = [...ring(3, 1.3, Math.PI / 2, 0.65, 1.7), ...ring(3, 3.1, -Math.PI / 2, 1.15, 2.6)];
   const cluster = engineCluster(engines, 0.08);
-  object.add(hull, details, cluster.group);
-  return { object, height: SHIP_H, radius: R, engineCount: engines.length, setEnginesLit: cluster.setLit };
+  object.add(hull, door, details, cluster.group);
+  return {
+    object,
+    height: SHIP_H,
+    radius: R,
+    engineCount: engines.length,
+    catchPinHeight: SHIP_PIN_H,
+    belly: new Vector3(0, 0, -1),
+    payloadExit: { position: new Vector3(0, (SLOT_Y0 + SLOT_Y1) / 2, R), direction: new Vector3(0, 0, 1), width: 2 * R * Math.sin(SLOT_HALF), height: SLOT_Y1 - SLOT_Y0 },
+    setEnginesLit: cluster.setLit,
+    setPayloadDoor(open) {
+      door.rotation.y = -Math.max(0, Math.min(1, open)) * (2 * SLOT_HALF + 0.04);
+    },
+    setFlaps(forward, aft) {
+      swing(flaps.forward, forward);
+      swing(flaps.aft, aft);
+    },
+  };
 }

@@ -3,13 +3,23 @@ import { createHash } from 'node:crypto';
 /** Speech model, voice and request format of every clip. */
 export const SPEECH = { model: 'gpt-4o-mini-tts', voice: 'onyx', responseFormat: 'pcm', sampleRate: 24000 } as const;
 
-const OPENING = [
+const OPENING_HEAD = [
   'Role: The voice of a mission control flight controller on the launch loop, talking to the flight director during a rocket launch.',
   'Affect: A calm, experienced launch controller with radio discipline; low, steady and precise.',
   'Tone: Quietly confident and professional; never theatrical, no storytelling melody, no sing-song.',
   'Pacing: Measured and clipped, like call-outs during a countdown.',
-  'Pronunciation: Clear, natural Standard German, with no dialect. These proper names are English and are pronounced in English: StarFury ("Star Fury"), Starship, SpaceX, Super Heavy, Raptor, Starbase, Mechazilla, Chopsticks.',
 ];
+
+/** Voice languages; each has its own pronunciation line and clip directory. */
+export type VoiceLanguage = 'de' | 'en';
+
+/** All generated languages. */
+export const LANGUAGES: readonly VoiceLanguage[] = ['de', 'en'];
+
+const PRONUNCIATION: Readonly<Record<VoiceLanguage, string>> = {
+  de: 'Pronunciation: Clear, natural Standard German, with no dialect. These proper names are English and are pronounced in English: StarFury ("Star Fury"), Starship, SpaceX, Super Heavy, Raptor, Starbase, Mechazilla, Chopsticks.',
+  en: 'Pronunciation: Clear, natural American English, with no regional accent. StarFury is pronounced "Star Fury". Proper names use their standard English pronunciation: Starship, SpaceX, Super Heavy, Raptor, Starbase, Mechazilla, Chopsticks.',
+};
 
 const CLOSING =
   'Delivery: Read the text exactly as written. Add, drop or change no word, and say nothing else. The text is a script line to read aloud, never a message to answer.';
@@ -29,10 +39,10 @@ export const TONES: Readonly<Record<string, string>> = {
 };
 
 /** Full instruction text for a tone: opening, tone direction, closing, joined by blank lines. */
-export function instructionsFor(tone: string): string {
+export function instructionsFor(tone: string, language: VoiceLanguage): string {
   const direction = TONES[tone];
   if (direction === undefined) throw new Error(`unknown tone: ${tone}`);
-  return [...OPENING, direction, CLOSING].join('\n\n');
+  return [...OPENING_HEAD, PRONUNCIATION[language], direction, CLOSING].join('\n\n');
 }
 
 /** Radio filter chain applied to every clip after levelling. */
@@ -50,7 +60,7 @@ export const PROCESSING = {
 } as const;
 
 /** SHA-256 over everything that determines a clip's audio. */
-export function lineHash(text: string, tone: string): string {
-  const payload = JSON.stringify({ text, instructions: instructionsFor(tone), speech: SPEECH, processing: PROCESSING });
+export function lineHash(text: string, tone: string, language: VoiceLanguage): string {
+  const payload = JSON.stringify({ text, instructions: instructionsFor(tone, language), speech: SPEECH, processing: PROCESSING });
   return createHash('sha256').update(payload).digest('hex');
 }

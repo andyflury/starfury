@@ -102,9 +102,11 @@ export function tiltOf(s: LiftoffState): number {
   return Math.hypot(s.tiltX, s.tiltZ);
 }
 
-/** The tilt along the screen's right, in degrees, as seen from the camera. */
-export function screenTiltOf(s: LiftoffState): number {
-  return s.tiltX * Math.cos(s.site.yaw) - s.tiltZ * Math.sin(s.site.yaw);
+/** The tilt as seen from the camera, in degrees: `right` towards screen right, `away` away from the camera, the stick's frame. */
+export function screenTiltOf(s: LiftoffState): { right: number; away: number } {
+  const cos = Math.cos(s.site.yaw);
+  const sin = Math.sin(s.site.yaw);
+  return { right: s.tiltX * cos - s.tiltZ * sin, away: -s.tiltX * sin - s.tiltZ * cos };
 }
 
 /** Where the rocket's base is and the unit direction of its axis, in world space. */

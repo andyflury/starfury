@@ -1,16 +1,16 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { instructionsFor, lineHash, PROCESSING, SPEECH } from './voice-settings.ts';
+import { instructionsFor, LANGUAGES, lineHash, PROCESSING, SPEECH } from './voice-settings.ts';
+import type { VoiceLanguage } from './voice-settings.ts';
 
 interface Line {
-  text: string;
   tone: string;
+  de: string;
+  en: string;
 }
 
 const ROOT = join(import.meta.dirname, '..');
-const OUT = join(ROOT, 'public', 'voice', 'de');
-const MANIFEST = join(OUT, 'manifest.json');
 const MAX_ATTEMPTS = 4;
 const ACCEPT_SIMILARITY = 0.85;
 const CONCURRENCY = 4;
@@ -38,7 +38,7 @@ async function api(url: string, init: (headers: Record<string, string>) => Reque
   }
 }
 
-async function speech(text: string, tone: string): Promise<Buffer> {
+async function speech(text: string, tone: string, language: VoiceLanguage): Promise<Buffer> {
   const res = await api('https://api.openai.com/v1/audio/speech', (headers) => ({
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
@@ -46,7 +46,7 @@ async function speech(text: string, tone: string): Promise<Buffer> {
       model: SPEECH.model,
       voice: SPEECH.voice,
       input: text,
-      instructions: instructionsFor(tone),
+      instructions: instructionsFor(tone, language),
       response_format: SPEECH.responseFormat,
     }),
   }));
@@ -70,13 +70,15 @@ function wav(pcm: Buffer): Buffer {
   return Buffer.concat([header, pcm]);
 }
 
-async function transcribe(pcm: Buffer): Promise<string> {
+const TRANSCRIPTION_PROMPT: Record<VoiceLanguage, string> = { de: 'Ein kurzer Satz auf Deutsch.', en: 'A short sentence in English.' };
+
+async function transcribe(pcm: Buffer, language: VoiceLanguage): Promise<string> {
   const res = await api('https://api.openai.com/v1/audio/transcriptions', (headers) => {
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(wav(pcm))], { type: 'audio/wav' }), 'line.wav');
     form.append('model', 'gpt-4o-transcribe');
-    form.append('language', 'de');
-    form.append('prompt', 'Ein kurzer Satz auf Deutsch.');
+    form.append('language', language);
+    form.append('prompt', TRANSCRIPTION_PROMPT[language]);
     form.append('response_format', 'text');
     return { method: 'POST', headers, body: form };
   });
@@ -93,11 +95,21 @@ function germanNumber(n: number): string {
   return n % 10 === 0 ? tens : `${ONES[n % 10] ?? ''}und${tens}`;
 }
 
-function normalise(text: string): string {
+const EN_ONES = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
+const EN_TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+
+function englishNumber(n: number): string {
+  if (n < 20) return EN_ONES[n] ?? '';
+  const tens = EN_TENS[Math.floor(n / 10)] ?? '';
+  return n % 10 === 0 ? tens : `${tens}${EN_ONES[n % 10] ?? ''}`;
+}
+
+function normalise(text: string, language: VoiceLanguage): string {
+  const words = language === 'de' ? germanNumber : englishNumber;
   return text
     .toLowerCase()
     .replace(/ß/g, 'ss')
-    .replace(/\d+/g, (d) => ` ${Number(d) < 100 ? germanNumber(Number(d)) : d} `)
+    .replace(/\d+/g, (d) => ` ${Number(d) < 100 ? words(Number(d)) : d} `)
     .replace(/[^a-zäöü]/g, '');
 }
 
@@ -150,14 +162,14 @@ interface Outcome {
   error?: string;
 }
 
-async function generate(id: string, line: Line): Promise<Outcome> {
-  const expected = normalise(line.text);
+async function generate(id: string, text: string, tone: string, language: VoiceLanguage): Promise<Outcome> {
+  const expected = normalise(text, language);
   let best: { similarity: number; heard: string; pcm: Buffer } = { similarity: -1, heard: '', pcm: Buffer.alloc(0) };
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     try {
-      const pcm = await speech(line.text, line.tone);
-      const heard = await transcribe(pcm);
-      const score = similarity(normalise(heard), expected);
+      const pcm = await speech(text, tone, language);
+      const heard = await transcribe(pcm, language);
+      const score = similarity(normalise(heard, language), expected);
       if (score > best.similarity) best = { similarity: score, heard, pcm };
       if (score === 1) return { id, mp3: render(pcm) };
       if (attempt === MAX_ATTEMPTS && best.similarity >= ACCEPT_SIMILARITY) {
@@ -171,57 +183,70 @@ async function generate(id: string, line: Line): Promise<Outcome> {
 }
 
 const lines = JSON.parse(readFileSync(join(ROOT, 'src', 'audio', 'lines.json'), 'utf8')) as Record<string, Line>;
-mkdirSync(OUT, { recursive: true });
-const manifest: Record<string, string> = existsSync(MANIFEST) ? (JSON.parse(readFileSync(MANIFEST, 'utf8')) as Record<string, string>) : {};
+const ids = Object.keys(lines);
+let anyFailed = false;
 
-for (const file of readdirSync(OUT)) {
-  if (!file.endsWith('.mp3')) continue;
-  const id = file.slice(0, -4);
-  if (!(id in lines)) {
-    rmSync(join(OUT, file));
-    console.log(`${id}: removed (no longer in lines.json)`);
-  }
-}
-for (const id of Object.keys(manifest)) if (!(id in lines)) delete manifest[id];
+async function runLanguage(language: VoiceLanguage): Promise<void> {
+  const out = join(ROOT, 'public', 'voice', language);
+  const manifestFile = join(out, 'manifest.json');
+  const callsBefore = apiCalls;
+  mkdirSync(out, { recursive: true });
+  const manifest: Record<string, string> = existsSync(manifestFile) ? (JSON.parse(readFileSync(manifestFile, 'utf8')) as Record<string, string>) : {};
 
-const todo = Object.entries(lines).filter(([id, line]) => !existsSync(join(OUT, `${id}.mp3`)) || manifest[id] !== lineHash(line.text, line.tone));
-const accepted: string[] = [];
-const failed: string[] = [];
-let generated = 0;
-let next = 0;
-
-async function worker(): Promise<void> {
-  for (;;) {
-    const entry = todo[next];
-    next += 1;
-    if (entry === undefined) return;
-    const [id, line] = entry;
-    const outcome = await generate(id, line);
-    if (outcome.mp3 === undefined) {
-      rmSync(join(OUT, `${id}.mp3`), { force: true });
-      delete manifest[id];
-      failed.push(`${id}: ${outcome.error}`);
-      console.log(`${id}: FAILED ${outcome.error}`);
-      continue;
+  for (const file of readdirSync(out)) {
+    if (!file.endsWith('.mp3')) continue;
+    const id = file.slice(0, -4);
+    if (!(id in lines)) {
+      rmSync(join(out, file));
+      console.log(`[${language}] ${id}: removed (no longer in lines.json)`);
     }
-    const tmp = join(OUT, `${id}.mp3.tmp`);
-    writeFileSync(tmp, outcome.mp3);
-    renameSync(tmp, join(OUT, `${id}.mp3`));
-    manifest[id] = lineHash(line.text, line.tone);
-    generated += 1;
-    if (outcome.note !== undefined) accepted.push(`${id}: ${outcome.note}`);
-    console.log(`${id}: ok${outcome.note === undefined ? '' : ` (accepted with differences: ${outcome.note})`}`);
+  }
+  for (const id of Object.keys(manifest)) if (!(id in lines)) delete manifest[id];
+
+  const textOf = (line: Line): string => line[language];
+  const todo = Object.entries(lines).filter(([id, line]) => !existsSync(join(out, `${id}.mp3`)) || manifest[id] !== lineHash(textOf(line), line.tone, language));
+  const accepted: string[] = [];
+  const failed: string[] = [];
+  let generated = 0;
+  let next = 0;
+
+  async function worker(): Promise<void> {
+    for (;;) {
+      const entry = todo[next];
+      next += 1;
+      if (entry === undefined) return;
+      const [id, line] = entry;
+      const outcome = await generate(id, textOf(line), line.tone, language);
+      if (outcome.mp3 === undefined) {
+        rmSync(join(out, `${id}.mp3`), { force: true });
+        delete manifest[id];
+        failed.push(`${id}: ${outcome.error}`);
+        console.log(`[${language}] ${id}: FAILED ${outcome.error}`);
+        continue;
+      }
+      const tmp = join(out, `${id}.mp3.tmp`);
+      writeFileSync(tmp, outcome.mp3);
+      renameSync(tmp, join(out, `${id}.mp3`));
+      manifest[id] = lineHash(textOf(line), line.tone, language);
+      generated += 1;
+      if (outcome.note !== undefined) accepted.push(`${id}: ${outcome.note}`);
+      console.log(`[${language}] ${id}: ok${outcome.note === undefined ? '' : ` (accepted with differences: ${outcome.note})`}`);
+    }
+  }
+
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+
+  const sorted = Object.fromEntries(Object.entries(manifest).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  writeFileSync(manifestFile, `${JSON.stringify(sorted, null, 2)}\n`);
+
+  console.log(`\n[${language}] ${ids.length} lines, ${generated} generated, ${ids.length - todo.length} up to date, ${failed.length} failed, ${apiCalls - callsBefore} API calls`);
+  if (accepted.length > 0) console.log(`[${language}] accepted with differences:\n  ${accepted.join('\n  ')}`);
+  if (failed.length > 0) {
+    console.log(`[${language}] failed:\n  ${failed.join('\n  ')}`);
+    anyFailed = true;
   }
 }
 
-await Promise.all(Array.from({ length: CONCURRENCY }, worker));
-
-const sorted = Object.fromEntries(Object.entries(manifest).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
-writeFileSync(MANIFEST, `${JSON.stringify(sorted, null, 2)}\n`);
-
-console.log(`\n${Object.keys(lines).length} lines, ${generated} generated, ${Object.keys(lines).length - todo.length} up to date, ${failed.length} failed, ${apiCalls} API calls`);
-if (accepted.length > 0) console.log(`accepted with differences:\n  ${accepted.join('\n  ')}`);
-if (failed.length > 0) {
-  console.log(`failed:\n  ${failed.join('\n  ')}`);
-  process.exitCode = 1;
-}
+for (const language of LANGUAGES) await runLanguage(language);
+console.log(`\ntotal API calls: ${apiCalls}`);
+if (anyFailed) process.exitCode = 1;

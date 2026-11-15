@@ -72,6 +72,8 @@ function reset(): void {
   climb = 0;
   boosterLit = shipLit = exhaustB = exhaustS = steam = 0;
   chop = chopTarget = 0;
+  orbit = false;
+  sky = door = flaps = vapor = plasma = 0;
 }
 
 function lift(on: boolean): void {
@@ -81,6 +83,53 @@ function lift(on: boolean): void {
     setExhaust(1, 0);
     setSteam(1);
   }
+}
+
+let orbit = false, sky = 0, door = 0, flaps = 0, vapor = 0, plasma = 0;
+const plasmaFrom = new Vector3(0, 0, -1);
+
+function setOrbit(on: boolean): void {
+  orbit = on;
+  world.setEnvironment(on ? 'orbit' : 'site');
+  if (on) {
+    booster.object.visible = false;
+    ship.object.position.set(0, -25, 0);
+    ship.object.rotation.set(-Math.PI / 2, 0, 0);
+    camera.position.set(25, 15, 90);
+    controls.target.set(0, -25, -10);
+    controls.update();
+  }
+}
+
+function setSky(level: number): void {
+  sky = level;
+  world.setSkyAltitude(level);
+}
+
+function setDoor(open: number): void {
+  door = open;
+  ship.setPayloadDoor(open);
+}
+
+function setFlaps(level: number): void {
+  flaps = level;
+  ship.setFlaps(level, level);
+}
+
+/** Hangs the ship with its pins at the raised catch point, the booster on the pad. */
+function shipHang(): void {
+  reset();
+  tower.setArmHeight(1);
+  ship.object.position.set(tower.catchPoint.x, tower.catchPoint.y - ship.catchPinHeight, tower.catchPoint.z);
+}
+
+/** Lays the ship belly-down at 300 m, nose towards -Z, with the air coming from below. */
+function bellyFlop(): void {
+  reset();
+  booster.object.visible = false;
+  ship.object.position.set(0, 300, 25);
+  ship.object.rotation.set(-Math.PI / 2, 0, 0);
+  plasmaFrom.set(0, -1, 0);
 }
 
 function hang(): void {
@@ -131,7 +180,8 @@ function render(dt: number): void {
     info.textContent =
       `calls ${r.calls}  triangles ${r.triangles}  particles ${effects.liveParticles()}  programs ${renderer.info.programs?.length ?? 0}\n` +
       `engines B ${boosterLit} S ${shipLit}  exhaust B ${exhaustB} S ${exhaustS}  steam ${steam}  chop ${chop.toFixed(2)}${paused ? '  PAUSED' : ''}\n` +
-      `E/Q engines  X/Z exhaust  P steam  C chopsticks  L lift  H hang  B blast 100 m  N blast ground  K shake  R reset  1-9 views  Space pause`;
+      `E/Q engines  X/Z exhaust  P steam  C chopsticks  L lift  H hang  B blast 100 m  N blast ground  K shake  R reset  1-9 views  Space pause\n` +
+      `O orbit ${orbit}  A sky ${sky}  D door ${door}  F flaps ${flaps}  G ship hang  V vapour ${vapor}  M plasma ${plasma}`;
 }
 
 /** Advances the simulation by `seconds` in 1/60 s steps, then renders once. */
@@ -159,6 +209,19 @@ window.addEventListener('keydown', (e) => {
   else if (k === 'n') effects.explode(new Vector3(60, 0, 60));
   else if (k === 'k') effects.shake(1);
   else if (k === 'r') reset();
+  else if (k === 'o') setOrbit(!orbit);
+  else if (k === 'a') setSky(cycle([0, 0.3, 0.6, 1], sky));
+  else if (k === 'd') setDoor(door > 0.5 ? 0 : 1);
+  else if (k === 'f') setFlaps(cycle([0, 1, -1], flaps));
+  else if (k === 'g') shipHang();
+  else if (k === 'v') {
+    vapor = cycle([0, 0.5, 1], vapor);
+    effects.setVapor(booster, vapor);
+  } else if (k === 'm') {
+    if (plasma === 0) bellyFlop();
+    plasma = cycle([0, 0.5, 1], plasma);
+    effects.setPlasma(ship, plasma, plasmaFrom);
+  }
   else if (k === ' ') paused = !paused;
 });
 
@@ -202,6 +265,29 @@ const harness = {
   raise: (dy: number) => {
     booster.object.position.y += dy;
     ship.object.position.y += dy;
+  },
+  orbit: setOrbit,
+  sky: setSky,
+  door: setDoor,
+  flaps: (f: number, a: number) => ship.setFlaps(f, a),
+  shipHang,
+  armHeight: (l: number) => tower.setArmHeight(l),
+  vapor: (l: number) => {
+    vapor = l;
+    effects.setVapor(booster, l);
+  },
+  plasma: (l: number) => {
+    plasma = l;
+    effects.setPlasma(ship, l, plasmaFrom);
+  },
+  bellyFlop,
+  place: (which: 'ship' | 'booster', x: number, y: number, z: number, rx: number, ry: number, rz: number) => {
+    const o = (which === 'ship' ? ship : booster).object;
+    o.position.set(x, y, z);
+    o.rotation.set(rx, ry, rz);
+  },
+  hide: (which: 'ship' | 'booster') => {
+    (which === 'ship' ? ship : booster).object.visible = false;
   },
   separate: (dy: number) => {
     ship.object.position.y += dy;

@@ -1,5 +1,6 @@
 import { el, type Screen, svgBox } from './dom.ts';
 import { ICONS } from './icons.ts';
+import { currentLanguage, flagSvg, setLanguage } from './language.ts';
 import { wordmarkSvg } from './wordmark.ts';
 
 /** Which parent options the start press asked for. */
@@ -16,7 +17,7 @@ export interface TitleScreen extends Screen {
   launch(): void;
 }
 
-/** Mounts the title screen in `overlay`. */
+/** Mounts the title screen in `overlay`; its flag button switches the voice language without starting. */
 export function showTitle(overlay: HTMLElement): TitleScreen {
   const root = el('div', 'screen title', overlay);
   svgBox('title-logo', wordmarkSvg(), root);
@@ -26,6 +27,14 @@ export function showTitle(overlay: HTMLElement): TitleScreen {
   setupButton.innerHTML = ICONS.controllerRedo;
   const nameButton = el('button', 'corner-button corner-right', root);
   nameButton.innerHTML = ICONS.nameTag;
+  const languageButton = el('button', 'corner-button corner-bottom-left language-button', root);
+  languageButton.innerHTML = flagSvg(currentLanguage());
+  languageButton.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+    const next = currentLanguage() === 'de' ? 'en' : 'de';
+    setLanguage(next);
+    languageButton.innerHTML = flagSvg(next);
+  });
 
   let resolve: (choice: TitleChoice) => void = () => {};
   const pressed = new Promise<TitleChoice>((r) => {

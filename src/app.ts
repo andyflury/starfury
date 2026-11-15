@@ -2,11 +2,13 @@ import lines from './audio/lines.json';
 import type { GameInput } from './input/index.ts';
 import { MISSION, type MissionStep } from './stages/index.ts';
 import { load, save } from './storage.ts';
-import type { App, Audio, FactId, LineId, Stage, StageResult, Stars } from './types.ts';
+import type { App, Audio, FactId, Language, LineId, Stage, StageResult, Stars } from './types.ts';
 import type { Screen } from './ui/dom.ts';
 import { showFactCard } from './ui/factCard.ts';
+import { currentLanguage } from './ui/language.ts';
 import { showNameEntry } from './ui/nameEntry.ts';
 import { showPatch } from './ui/patch.ts';
+import { type PickerLanding, type PickerTile, showPicker } from './ui/picker.ts';
 import { showRetry } from './ui/retry.ts';
 import { runSetupWizard } from './ui/setupWizard.ts';
 import { showTitle } from './ui/title.ts';
@@ -19,7 +21,7 @@ export interface ShellContext extends App {
 
 /** Where the game is, for automated checks. */
 export interface DebugState {
-  /** The current step: `title`, `setup`, `name`, a mission step id, or `patch`. */
+  /** The current step: `title`, `setup`, `name`, `picker`, a mission step id, or `patch`. */
   step: string;
   /** The last stage result. */
   result: StageResult | undefined;
@@ -35,6 +37,21 @@ const FACTS = (Object.keys(lines) as LineId[]).filter((id): id is FactId => id.s
 const shownFacts = new Set<FactId>();
 let bridged = false;
 
+/** The picker tile that starts the whole mission. */
+const MISSION_TILE = 'mission';
+let lastPlayed = MISSION_TILE;
+
+type StageStep = Extract<MissionStep, { kind: 'stage' }>;
+const STAGES = MISSION.filter((s): s is StageStep => s.kind === 'stage');
+
+/** Ids of the stages whose tile is locked: those after a scored stage never completed. */
+function lockedStages(): Set<string> {
+  const best = load('best') ?? {};
+  return new Set(STAGES.filter((_, i) => i > 0 && best[STAGES[i - 1]?.id ?? ''] === undefined).map((s) => s.id));
+}
+
+const image = (name: string): string => `${import.meta.env.BASE_URL}img/${name}.webp`;
+
 /** Seconds after a waiting screen appears, or its voice ends, before the flip reminder plays. */
 const REMIND_AFTER = 4;
 const ORBIT_SPEED = 0.08;
@@ -47,7 +64,7 @@ interface Waiter {
   reject(e: Error): void;
 }
 
-/** Runs the mission flow from title to patch; `frame` advances it once per animation frame. */
+/** Runs the game from the title through the picker, single stages and whole missions; `frame` advances it once per frame. */
 export function createShell(ctx: ShellContext): { frame(dt: number): void } {
   const { world, effects, camera, input, voice, sfx, hud, overlay, audio } = ctx;
   const debug: DebugState = { step: 'title', result: undefined };
@@ -58,7 +75,9 @@ export function createShell(ctx: ShellContext): { frame(dt: number): void } {
   let screens: Screen[] = [];
   let stage: Stage | undefined;
   let polling = true;
-  let loaded: Promise<void> | undefined;
+  let loadedLanguage: Language | undefined;
+  let loading: Promise<void> = Promise.resolve();
+  document.documentElement.lang = currentLanguage();
   let orbitAngle = 0.6;
 
   /** Circles the camera around the pad with the stack left of the frame's centre. */
@@ -158,8 +177,12 @@ export function createShell(ctx: ShellContext): { frame(dt: number): void } {
     const title = mount(showTitle(overlay));
     const choice = await guard(title.pressed);
     title.launch();
-    loaded ??= audio.unlock().then(() => voice.load());
-    await guard(loaded);
+    const language = currentLanguage();
+    if (language !== loadedLanguage) {
+      loadedLanguage = language;
+      loading = audio.unlock().then(() => voice.load(language));
+    }
+    await guard(loading);
     await guard(voice.say('welcome'));
     unmount(title);
 
@@ -167,10 +190,53 @@ export function createShell(ctx: ShellContext): { frame(dt: number): void } {
     const padConnected = navigator.getGamepads().some((p) => p !== null);
     if (choice.setup || (jump < 0 && !input.mapped && padConnected)) await setup();
     if (choice.name || (jump < 0 && !load('name'))) await nameEntry();
-    for (let from = Math.max(0, jump); ; from = 0) {
-      const stars = await mission(from);
-      await patch(stars);
+    if (jump >= 0) await wholeMission(jump);
+    let landing: PickerLanding | undefined;
+    for (;;) {
+      const id = await picker(landing);
+      lastPlayed = id;
+      landing = undefined;
+      const step = STAGES.find((s) => s.id === id);
+      if (step) landing = await single(step);
+      else await wholeMission(0);
     }
+  }
+
+  /** Shows the picker until a tile is started; returns its id. */
+  async function picker(landing: PickerLanding | undefined): Promise<string> {
+    debug.step = 'picker';
+    world.resetToPad();
+    const best = load('best') ?? {};
+    const locked = lockedStages();
+    const tiles: PickerTile[] = [
+      { id: MISSION_TILE, image: image('stage_mission'), stars: undefined, locked: false },
+      ...STAGES.map((s) => ({ id: s.id, image: image(`stage_${s.id}`), stars: best[s.id] ?? 0, locked: locked.has(s.id) })),
+    ];
+    const screen = mount(showPicker(overlay, tiles, lastPlayed, landing, voice, sfx));
+    input.flush();
+    scenery = (dt) => {
+      orbit(dt);
+      screen.update(dt, input);
+    };
+    const id = await guard(screen.chosen);
+    await guard(seconds(0.4));
+    unmount(screen);
+    return id;
+  }
+
+  /** Runs every step from `from` in order, then the patch. */
+  async function wholeMission(from: number): Promise<void> {
+    const stars = await mission(from);
+    await patch(stars);
+  }
+
+  /** Runs one stage until it succeeds; returns its stars and the tile that success unlocked. */
+  async function single(step: StageStep): Promise<PickerLanding> {
+    const before = lockedStages();
+    const stars = new Map<string, Stars>();
+    await runStage(step, stars);
+    const after = lockedStages();
+    return { id: step.id, stars: stars.get(step.id) ?? 0, unlocks: [...before].find((id) => !after.has(id)) };
   }
 
   async function setup(): Promise<void> {
@@ -194,13 +260,13 @@ export function createShell(ctx: ShellContext): { frame(dt: number): void } {
   async function mission(from: number): Promise<Map<string, Stars>> {
     const stars = new Map<string, Stars>();
     for (const step of MISSION.slice(from)) {
-      if (step.kind === 'fact') await fact();
+      if (step.kind === 'fact') await fact(step.id);
       else await runStage(step, stars);
     }
     return stars;
   }
 
-  async function runStage(step: Extract<MissionStep, { kind: 'stage' }>, stars: Map<string, Stars>): Promise<void> {
+  async function runStage(step: Extract<MissionStep, { create: unknown }>, stars: Map<string, Stars>): Promise<void> {
     debug.step = step.id;
     const s = step.create(ctx);
     stage = s;
@@ -236,8 +302,8 @@ export function createShell(ctx: ShellContext): { frame(dt: number): void } {
     scenery = hold();
   }
 
-  async function fact(): Promise<void> {
-    debug.step = 'fact';
+  async function fact(stepId: string): Promise<void> {
+    debug.step = stepId;
     let pool = FACTS.filter((f) => !shownFacts.has(f));
     if (pool.length === 0) {
       shownFacts.clear();
@@ -246,7 +312,7 @@ export function createShell(ctx: ShellContext): { frame(dt: number): void } {
     const id = pool[Math.floor(Math.random() * pool.length)];
     if (!id) return;
     shownFacts.add(id);
-    const card = mount(showFactCard(overlay, `${import.meta.env.BASE_URL}img/${id}.webp`));
+    const card = mount(showFactCard(overlay, image(id)));
     card.speaking(true);
     if (!bridged) {
       bridged = true;

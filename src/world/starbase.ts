@@ -1,4 +1,5 @@
 import {
+  BackSide,
   BoxGeometry,
   BufferAttribute,
   BufferGeometry,
@@ -16,14 +17,19 @@ import {
   Matrix4,
   Mesh,
   MeshStandardMaterial,
+  Points,
+  PointsMaterial,
   Quaternion,
   RepeatWrapping,
   SRGBColorSpace,
+  ShaderMaterial,
+  SphereGeometry,
   Vector2,
   Vector3,
 } from 'three';
 import type { Scene } from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { createOrbit, starField } from './orbit.ts';
 import type { Tower } from '../types.ts';
 
 /** Height of the launch mount's table top above the ground. */
@@ -111,10 +117,10 @@ export function rng(seed: number): () => number {
   };
 }
 
-/** The sky's colour in direction (x, y, z), unit length, as sRGB 0..1 written into `out`. */
-function skyColor(x: number, y: number, z: number, out: Color): Color {
+/** The sky's colour in direction (x, y, z), unit length, as sRGB 0..1 written into `out`; below the horizon it is the horizon haze, turning to sand when `ground`. */
+function skyColor(x: number, y: number, z: number, ground: boolean, out: Color): Color {
   if (y >= 0) out.copy(HORIZON).lerp(ZENITH, 1 - Math.pow(1 - y, 2.6));
-  else out.copy(HORIZON).lerp(HAZE_GROUND, Math.min(1, -y * 5));
+  else out.copy(HORIZON).lerp(HAZE_GROUND, ground ? Math.min(1, -y * 5) : 0);
   const c = Math.max(0, x * SUN_DIR.x + y * SUN_DIR.y + z * SUN_DIR.z);
   const sun = Math.pow(c, 1400) * 1.2 + Math.pow(c, 60) * 0.22 + Math.pow(c, 6) * 0.06;
   out.r = Math.min(1, out.r + sun);
@@ -124,7 +130,7 @@ function skyColor(x: number, y: number, z: number, out: Color): Color {
 }
 
 /** The equirectangular sky, `w` pixels wide, with its colours moved `desaturate` of the way to grey. */
-function skyTexture(w: number, desaturate: number): CanvasTexture {
+function skyTexture(w: number, desaturate: number, ground: boolean): CanvasTexture {
   const h = w / 2;
   const [c, ctx] = canvas2d(w, h);
   const img = ctx.createImageData(w, h);
@@ -135,7 +141,7 @@ function skyTexture(w: number, desaturate: number): CanvasTexture {
     const cy = Math.sin(lat), cr = Math.cos(lat);
     for (let px = 0; px < w; px++) {
       const lon = ((px + 0.5) / w - 0.5) * Math.PI * 2;
-      skyColor(Math.cos(lon) * cr, cy, Math.sin(lon) * cr, col);
+      skyColor(Math.cos(lon) * cr, cy, Math.sin(lon) * cr, ground, col);
       const grey = col.r * 0.3 + col.g * 0.55 + col.b * 0.15;
       col.r += (grey - col.r) * desaturate;
       col.g += (grey - col.g) * desaturate;
@@ -358,6 +364,8 @@ const ARM_HALF_WIDTH = 0.8;
 const ARM_DEPTH = 3.4;
 const ARM_LENGTH = 28;
 const ARM_OPEN = (32 * Math.PI) / 180;
+/** How far the arm carriage rises from the booster catch height to the ship catch height. */
+const ARM_TRAVEL = 41;
 
 function buildTower(booster: { radius: number; catchPinHeight: number }): Tower {
   const object = new Group();
@@ -414,10 +422,10 @@ function buildTower(booster: { radius: number; catchPinHeight: number }): Tower 
 
   const catchPoint = new Vector3(0, MOUNT_TOP + CATCH_CLEARANCE + booster.catchPinHeight, 0);
   const pivotZ = booster.radius + ARM_HALF_WIDTH;
-  const armTop = catchPoint.y - CATCH_PIN_HALF;
+  const lowCatch = catchPoint.y;
 
   const carriage = new Group();
-  carriage.position.y = armTop;
+  carriage.position.y = catchPoint.y - CATCH_PIN_HALF;
   object.add(carriage);
   const armMat = new MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.55 });
   const carriageMesh = new Mesh(
@@ -463,7 +471,11 @@ function buildTower(booster: { radius: number; catchPinHeight: number }): Tower 
     halfZ: Math.max(towerHalf, pivotZ + CARRIAGE_SIDE),
     top: MAST_BASE + MAST_HEIGHT,
   };
-  return { object, catchPoint, catchHalfWidth, arms, footprint, setChopsticks };
+  const setArmHeight = (level: number): void => {
+    catchPoint.y = lowCatch + ARM_TRAVEL * Math.min(1, Math.max(0, level));
+    carriage.position.y = catchPoint.y - CATCH_PIN_HALF;
+  };
+  return { object, catchPoint, catchHalfWidth, arms, footprint, setChopsticks, setArmHeight };
 }
 
 /** Tank farm, buildings and scrub, as instanced meshes. */
@@ -579,19 +591,63 @@ function buildClouds(): Clouds {
   };
 }
 
-/** The site without the rocket: sky, light, ground, sea, mount, tower and scenery. */
+const DOME_VERT = /* glsl */ `
+varying vec3 vDir;
+void main() {
+  vec4 world = modelMatrix * vec4(position, 1.0);
+  vDir = world.xyz - cameraPosition;
+  gl_Position = projectionMatrix * viewMatrix * world;
+}`;
+
+const DOME_FRAG = /* glsl */ `
+uniform float uLevel;
+uniform vec3 uSun;
+uniform vec3 uBand;
+uniform float uEdge;
+varying vec3 vDir;
+void main() {
+  vec3 d = normalize(vDir);
+  float h = max(cameraPosition.y, 0.0);
+  float e = d.y + h / sqrt(h * h + uEdge * uEdge);
+  vec3 zenith = mix(vec3(0.16, 0.42, 0.82), vec3(0.04, 0.1, 0.32), smoothstep(0.0, 0.5, uLevel));
+  zenith = mix(zenith, vec3(0.0, 0.004, 0.02), smoothstep(0.45, 1.0, uLevel));
+  vec3 col = mix(uBand, zenith, 1.0 - pow(1.0 - clamp(e, 0.0, 1.0), 2.6 + 14.0 * uLevel));
+  float s = max(0.0, dot(d, uSun));
+  col += vec3(1.0, 0.97, 0.9) * (pow(s, 1400.0) * 1.5 + pow(s, 60.0) * 0.2 * (1.0 - uLevel));
+  float a = clamp(uLevel * 4.0, 0.0, 1.0);
+  gl_FragColor = vec4(col, a);
+}`;
+
+/** Fog distances at sky altitude 0 and 1. */
+const FOG_NEAR = 900;
+const FOG_NEAR_HIGH = 8000;
+const FOG_FAR = 15000;
+const FOG_FAR_HIGH = 12500;
+/** Horizontal distance from the mount to the farthest corner of the ground and the sea. */
+const GROUND_EDGE = 20500;
+/** The haze colour at sky altitude 1 (sRGB); at 0 it is the horizon colour. */
+const HIGH_HAZE = new Color(0.5, 0.64, 0.84);
+
+/** The lowest height particles settle at; the world moves it with the environment. */
+export const particleFloor = { y: 0 };
+
+/** The site and the orbit scene with the sun, the sky and the environment switch. */
 export interface Starbase {
   readonly root: Group;
   readonly tower: Tower;
   readonly padPoint: Vector3;
+  setEnvironment(environment: 'site' | 'orbit'): void;
+  setSkyAltitude(level: number): void;
   update(dt: number): void;
 }
 
-/** Builds the site into a new group, and sets the scene's background, environment and fog and adds the sun. */
+/** Builds the site and the orbit scene into a new group and sets the scene's background, environment and fog; starts at the site. */
 export function createStarbase(scene: Scene, booster: { radius: number; catchPinHeight: number }): Starbase {
-  scene.background = skyTexture(1024, 0);
-  scene.environment = skyTexture(256, 0.6);
-  scene.fog = new Fog(HORIZON.clone().convertSRGBToLinear(), 900, 15000);
+  const siteBackground = skyTexture(1024, 0, false);
+  const siteEnvironment = skyTexture(256, 0.6, true);
+  const space = new Color(0, 0, 0);
+  const fog = new Fog(HORIZON.clone().convertSRGBToLinear(), FOG_NEAR, FOG_FAR);
+  scene.fog = fog;
 
   const root = new Group();
   root.name = 'starbase';
@@ -610,19 +666,67 @@ export function createStarbase(scene: Scene, booster: { radius: number; catchPin
   sun.shadow.normalBias = 0.4;
   root.add(sun, sun.target);
 
+  const domeMat = new ShaderMaterial({
+    uniforms: { uLevel: { value: 0 }, uSun: { value: SUN_DIR }, uBand: { value: HORIZON.clone() }, uEdge: { value: GROUND_EDGE } },
+    vertexShader: DOME_VERT,
+    fragmentShader: DOME_FRAG,
+    side: BackSide,
+    transparent: true,
+    depthWrite: false,
+  });
+  const dome = new Mesh(new SphereGeometry(25000, 32, 16), domeMat);
+  dome.renderOrder = -10;
+  dome.frustumCulled = false;
+  const starMat = new PointsMaterial({ size: 1.6, sizeAttenuation: false, vertexColors: true, fog: false, transparent: true, depthWrite: false });
+  const stars = new Points(starField(2500, 19000, 52), starMat);
+  stars.renderOrder = -9;
+
   const { mesh: sea, normals } = buildSea();
   const tower = buildTower(booster);
   const clouds = buildClouds();
-  root.add(buildGround(), sea, buildPadSurfaces(), buildMount(), tower.object, buildScenery(), clouds.mesh);
+  const site = new Group();
+  site.name = 'site';
+  site.add(buildGround(), sea, buildPadSurfaces(), buildMount(), tower.object, buildScenery(), clouds.mesh, dome, stars);
+  const orbit = createOrbit(SUN_DIR);
+  root.add(site, orbit.group);
+
+  let altitude = 0;
+  const setSkyAltitude = (level: number): void => {
+    altitude = Math.max(0, Math.min(1, level));
+    domeMat.uniforms.uLevel!.value = altitude;
+    dome.visible = altitude > 0;
+    starMat.opacity = Math.min(1, Math.max(0, (altitude - 0.3) / 0.5));
+    stars.visible = starMat.opacity > 0;
+    fog.near = FOG_NEAR + (FOG_NEAR_HIGH - FOG_NEAR) * altitude;
+    fog.far = FOG_FAR + (FOG_FAR_HIGH - FOG_FAR) * Math.min(1, altitude * 5);
+    const band = domeMat.uniforms.uBand!.value as Color;
+    band.copy(HORIZON).lerp(HIGH_HAZE, altitude);
+    fog.color.copy(band).convertSRGBToLinear();
+  };
+  const setEnvironment = (environment: 'site' | 'orbit'): void => {
+    const atSite = environment === 'site';
+    site.visible = atSite;
+    orbit.group.visible = !atSite;
+    scene.background = atSite ? siteBackground : space;
+    scene.environment = atSite ? siteEnvironment : orbit.environment;
+    fog.far = atSite ? FOG_FAR + (FOG_FAR_HIGH - FOG_FAR) * Math.min(1, altitude * 5) : 1e9;
+    fog.near = atSite ? FOG_NEAR + (FOG_NEAR_HIGH - FOG_NEAR) * altitude : 1e9 - 1;
+    particleFloor.y = atSite ? 0 : -1e9;
+  };
+  setEnvironment('site');
 
   return {
     root,
     tower,
     padPoint: new Vector3(0, MOUNT_TOP, 0),
+    setEnvironment,
+    setSkyAltitude,
     update(dt) {
-      normals.offset.x += dt * 0.006;
-      normals.offset.y += dt * 0.0035;
-      clouds.update(dt);
+      if (site.visible) {
+        normals.offset.x += dt * 0.006;
+        normals.offset.y += dt * 0.0035;
+        clouds.update(dt);
+      } else orbit.update(dt);
     },
   };
 }

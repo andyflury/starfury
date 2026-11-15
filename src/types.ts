@@ -4,6 +4,9 @@ import type lines from './audio/lines.json';
 /** A voice line's id: a key of `audio/lines.json` and the basename of its MP3. */
 export type LineId = keyof typeof lines;
 
+/** A language the voice speaks; every line of `audio/lines.json` has its text in each, with its MP3 at `voice/<language>/<id>.mp3`. */
+export type Language = 'de' | 'en';
+
 /** The fact lines a fact card can show; each has an illustration at `img/<id>.webp`. */
 export type FactId = Exclude<Extract<LineId, `fact_${string}`>, 'fact_bridge'>;
 
@@ -36,8 +39,11 @@ export interface Input {
 }
 
 export interface Voice {
-  /** Fetches and decodes every line's MP3; a line without a file plays nothing. */
-  load(): Promise<void>;
+  /**
+   * Fetches and decodes every line's MP3 in `language`, replacing the lines loaded before and cutting off the one
+   * playing; a line without a file plays nothing.
+   */
+  load(language: Language): Promise<void>;
   /** Speaks a line, cutting off the one playing and dropping the queue; resolves when it ends or is cut off. */
   say(id: LineId): Promise<void>;
   /** Speaks a line after the ones playing and queued; resolves when it ends or is cut off. */
@@ -88,10 +94,32 @@ export interface Booster extends Vehicle {
   readonly catchPinHeight: number;
 }
 
+export interface Ship extends Vehicle {
+  /** Height above the base of the pins the chopsticks catch. */
+  readonly catchPinHeight: number;
+  /** Unit vector pointing out of the heat-shield side, in the ship's local space. */
+  readonly belly: Vector3;
+  /**
+   * The payload door's opening, in the ship's local space: its centre, the outward direction a satellite leaves in,
+   * and the opening's width across the hull and its height along it. A satellite is a flat slab that slides out
+   * broadside, its long edge across the opening.
+   */
+  readonly payloadExit: { readonly position: Vector3; readonly direction: Vector3; readonly width: number; readonly height: number };
+  /** 0 closes the payload door, 1 opens it. */
+  setPayloadDoor(open: number): void;
+  /** Swings the forward and the aft flaps: -1 folded against the hull, 0 at rest, +1 spread out. */
+  setFlaps(forward: number, aft: number): void;
+}
+
 export interface Tower {
   readonly object: Group;
-  /** Where the booster's catch pins rest when caught, on the launch mount's axis, in world space. */
+  /** Where a caught vehicle's catch pins rest, on the launch mount's axis, in world space. It moves with the arm carriage. */
   readonly catchPoint: Vector3;
+  /**
+   * Moves the arm carriage along the tower: 0 at the height where the booster is caught, 1 near the top of the tower,
+   * where the ship is caught. `catchPoint` moves with it.
+   */
+  setArmHeight(level: number): void;
   /** Half the gap between the open arms at the catch point. */
   readonly catchHalfWidth: number;
   /**
@@ -107,21 +135,30 @@ export interface Tower {
 }
 
 /**
- * Starbase. Metres, +Y up, ground at y = 0, the launch mount's axis at x = 0 and z = 0, the tower on the mount's
- * -X side and the sea towards -Z.
+ * The 3D world. In the `site` environment it is Starbase: metres, +Y up, ground at y = 0, the launch mount's axis at
+ * x = 0 and z = 0, the tower on the mount's -X side and the sea towards -Z. In the `orbit` environment the site is
+ * hidden and the Earth is seen from orbit: a vehicle flies near the origin towards -Z, +Y points away from the Earth,
+ * and the Earth's surface passes below under a black sky with stars.
  */
 export interface World {
   readonly root: Group;
   readonly tower: Tower;
   readonly booster: Booster;
-  readonly ship: Vehicle;
+  readonly ship: Ship;
   /** Where the booster's base stands on the launch mount, in world space. */
   readonly padPoint: Vector3;
   /** Radius of the launch mount's table, centred on the mount's axis with its top at `padPoint`'s height. */
   readonly mountRadius: number;
-  /** Stands the booster on the mount with the ship stacked on it: upright, visible, engines off, arms open. */
+  /**
+   * Stands the booster on the mount with the ship stacked on it: upright, visible, engines off, arms open at height 0,
+   * payload door closed, flaps at rest, in the `site` environment at sky altitude 0.
+   */
   resetToPad(): void;
-  /** Animates the sea and the clouds. */
+  /** Switches between Starbase and the view from orbit. */
+  setEnvironment(environment: 'site' | 'orbit'): void;
+  /** In `site`, darkens the sky and thins the haze with altitude: 0 at the ground to 1 at the edge of space. */
+  setSkyAltitude(level: number): void;
+  /** Animates the sea, the clouds and the Earth passing below. */
   update(dt: number): void;
 }
 
@@ -130,13 +167,20 @@ export interface Effects {
   setExhaust(vehicle: Vehicle, level: number): void;
   /** Steam and dust billowing from the launch mount, 0 off to 1 full; holds until set again. */
   setPadSteam(level: number): void;
+  /** The condensation cloud around a vehicle at maximum air pressure, 0 off to 1 full; holds until set again. */
+  setVapor(vehicle: Vehicle, level: number): void;
+  /**
+   * The plasma glowing on the side of a vehicle that faces the airflow during re-entry, 0 off to 1 full; `from` is the
+   * world-space direction the air comes from. Holds until set again.
+   */
+  setPlasma(vehicle: Vehicle, level: number, from: Vector3): void;
   /** Starts an explosion at a world position. */
   explode(at: Vector3): void;
   /** Adds camera shake, 0 to 1, that decays by itself. */
   shake(strength: number): void;
   /** Advances the particles and offsets the camera by the shake; called each frame after the camera is placed. */
   update(dt: number, camera: PerspectiveCamera): void;
-  /** Removes every particle, plume and shake. */
+  /** Removes every particle, plume, vapour, plasma and shake. */
   clear(): void;
 }
 
@@ -145,16 +189,26 @@ export type SpeedLight = 'green' | 'yellow' | 'red';
 
 /** The icon-only overlay shown while a stage runs. Every element is hidden until set and hides on `undefined`. */
 export interface Hud {
-  /** The throttle bar at `level`, the band from `bandFrom` to the top marked when given. */
-  setThrottle(level: number | undefined, bandFrom?: number): void;
-  /** The fuel bar, 0 empty to 1 full. */
+  /** The throttle bar at `level`; the band from `bandFrom` up to `bandTo`, the top when absent, is marked when given. */
+  setThrottle(level: number | undefined, bandFrom?: number, bandTo?: number): void;
+  /** The fuel bar, 0 empty to 1 full. Fuel, heat and pressure share one place on screen; a stage shows one of them. */
   setFuel(level: number | undefined): void;
+  /** The heat bar, 0 cool to 1 burning up. */
+  setHeat(level: number | undefined): void;
+  /** The air-pressure bar, 0 none to 1 the most the rocket takes, the stretch from `redFrom` up marked red. */
+  setPressure(level: number | undefined, redFrom?: number): void;
+  /** A row of `total` pips with the first `filled` lit: satellites released, rings flown through. */
+  setPips(filled: number | undefined, total?: number): void;
   /** The descent speed light. */
   setSpeedLight(light: SpeedLight | undefined): void;
   /** The big countdown digit. */
   setCountdown(n: number | undefined): void;
-  /** The tilt gauge, degrees from upright, with the crash limit marked. */
-  setTilt(degrees: number | undefined, limit?: number): void;
+  /**
+   * The tilt level: a dot in a round dial, offset from the centre by the tilt's two screen-relative parts in degrees,
+   * `right` towards screen right and `away` away from the camera (drawn upwards). The middle of the dial out to `safe`
+   * degrees is green; its rim is `edge` degrees, where the dot stops.
+   */
+  setTilt(right: number | undefined, away?: number, safe?: number, edge?: number): void;
   /** The animated controller hint showing which stick or switch to move. */
   setHint(icon: HintIcon | undefined): void;
   /** Hides every element. */

@@ -19,7 +19,7 @@ const voice: Voice = (() => {
   let end: (() => void) | undefined;
   const say = (id: LineId): Promise<void> => {
     end?.();
-    caption.textContent = `voice: ${lines[id].text}`;
+    caption.textContent = `voice: ${lines[id].de}`;
     return new Promise((resolve) => {
       const timer = setTimeout(() => done(), 1500);
       const done = (): void => {

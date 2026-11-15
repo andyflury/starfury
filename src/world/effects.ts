@@ -11,6 +11,7 @@ import {
   InstancedBufferGeometry,
   InstancedMesh,
   LatheGeometry,
+  Matrix3,
   Matrix4,
   Mesh,
   MeshStandardMaterial,
@@ -19,12 +20,13 @@ import {
   PlaneGeometry,
   Quaternion,
   ShaderMaterial,
+  SphereGeometry,
   Vector2,
   Vector3,
 } from 'three';
 import type { PerspectiveCamera, Scene } from 'three';
 import type { Effects, Vehicle } from '../types.ts';
-import { canvas2d, rng } from './starbase.ts';
+import { canvas2d, particleFloor, rng } from './starbase.ts';
 
 /** One particle's launch parameters; reused for every spawn. */
 interface Spawn {
@@ -255,7 +257,7 @@ class Pool {
       let py = pos[i3 + 1]! + vy * dt;
       const pz = pos[i3 + 2]! + vz * dt;
       let nvy = vy;
-      const minY = size * 0.3;
+      const minY = particleFloor.y + size * 0.3;
       if (py < minY) {
         py = minY;
         if (nvy < 0) nvy = 0;
@@ -382,9 +384,111 @@ interface Plume {
   smokeAcc: number;
 }
 
+const VAPOR_VERT = /* glsl */ `
+varying float vT;
+varying float vA;
+varying vec3 vN;
+varying vec3 vV;
+void main() {
+  vT = -position.y;
+  vA = atan(position.z, position.x);
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  vN = normalize(normalMatrix * normal);
+  vV = normalize(-mv.xyz);
+  gl_Position = projectionMatrix * mv;
+}`;
+
+const VAPOR_FRAG = /* glsl */ `
+uniform float uLevel;
+uniform float uTime;
+varying float vT;
+varying float vA;
+varying vec3 vN;
+varying vec3 vV;
+void main() {
+  float facing = abs(dot(normalize(vN), normalize(vV)));
+  float streak = (0.5 + 0.5 * sin(vA * 13.0 + 2.0 * sin(vA * 5.0 + uTime * 3.0))) * (0.6 + 0.4 * sin(vA * 29.0 - uTime * 2.0));
+  float flow = 0.55 + 0.45 * sin(vT * 16.0 - uTime * 14.0 + vA * 7.0);
+  float along = smoothstep(0.0, 0.06, vT) * pow(max(0.0, 1.0 - vT), 1.3);
+  float flick = 0.82 + 0.18 * sin(uTime * 23.0 + vA * 3.0);
+  float a = min(1.0, uLevel * along * (0.45 + 0.75 * streak * flow) * flick * (0.8 + 0.6 * (1.0 - facing)));
+  gl_FragColor = vec4(vec3(0.97, 0.98, 1.0) * (0.86 + 0.14 * facing), a);
+}`;
+
+const SHEATH_VERT = /* glsl */ `
+varying vec3 vN;
+varying vec3 vV;
+varying vec3 vP;
+void main() {
+  vP = position;
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  vN = normalize(normalMatrix * normal);
+  vV = normalize(-mv.xyz);
+  gl_Position = projectionMatrix * mv;
+}`;
+
+const SHEATH_FRAG = /* glsl */ `
+uniform float uLevel;
+uniform float uTime;
+uniform vec3 uFrom;
+varying vec3 vN;
+varying vec3 vV;
+varying vec3 vP;
+void main() {
+  vec3 n = normalize(vN);
+  float wind = max(0.0, dot(n, uFrom));
+  float rim = 1.0 - abs(dot(n, normalize(vV)));
+  float flick = 0.8 + 0.2 * sin(uTime * 31.0 + vP.y * 9.0 + vP.x * 5.0) * sin(uTime * 13.0 - vP.z * 7.0);
+  float g = uLevel * pow(wind, 0.9) * (0.7 + 1.6 * rim) * flick;
+  vec3 col = mix(vec3(1.0, 0.45, 0.14), vec3(1.0, 0.38, 0.62), clamp(rim * 1.2, 0.0, 1.0));
+  gl_FragColor = vec4(col * g, 1.0);
+}`;
+
+const WAKE_FRAG = /* glsl */ `
+uniform float uLevel;
+uniform float uTime;
+varying float vT;
+varying float vA;
+varying vec3 vN;
+varying vec3 vV;
+void main() {
+  float facing = abs(dot(normalize(vN), normalize(vV)));
+  float lines = pow(0.5 + 0.5 * sin(vA * 11.0 + 1.5 * sin(vT * 4.0 + vA * 3.0)), 5.0);
+  float flow = 0.5 + 0.5 * sin(vT * 22.0 - uTime * 26.0 + vA * 5.0);
+  float along = smoothstep(0.0, 0.08, vT) * pow(max(0.0, 1.0 - vT), 1.6);
+  float g = uLevel * along * (0.15 + 0.85 * lines * flow) * pow(facing, 0.7);
+  vec3 col = mix(vec3(1.0, 0.42, 0.12), vec3(0.95, 0.25, 0.5), vT);
+  gl_FragColor = vec4(col * g * 0.8, 1.0);
+}`;
+
+/** A unit collar from radius 1.04 at y = 0 flaring down to y = -1. */
+const vaporGeometry = plumeGeometry((t) => 1.04 + 1.5 * Math.pow(t, 0.6), 16);
+/** A unit wake from radius 1 at y = 0 narrowing to y = -1. */
+const wakeGeometry = plumeGeometry((t) => 1 - 0.65 * t, 12);
+const sheathGeometry = new SphereGeometry(1, 32, 20);
+
+interface Vapor {
+  vehicle: Vehicle;
+  mesh: Mesh;
+  material: ShaderMaterial;
+  level: number;
+  acc: number;
+}
+
+interface Plasma {
+  vehicle: Vehicle;
+  sheath: Mesh;
+  sheathMat: ShaderMaterial;
+  wake: Mesh;
+  wakeMat: ShaderMaterial;
+  level: number;
+  from: Vector3;
+  acc: number;
+}
+
 const DEBRIS = 40;
 
-/** Builds the particle pools, plumes, debris and camera shake and adds them to the scene. */
+/** Builds the particle pools, plumes, vapour, plasma, debris and camera shake and adds them to the scene. */
 export function createEffectsImpl(scene: Scene): Effects & { liveParticles(): number } {
   const map = puffTexture();
   const smoke = new Pool(1500, map, 0.5, 1, 10);
@@ -410,6 +514,123 @@ export function createEffectsImpl(scene: Scene): Effects & { liveParticles(): nu
   const v1 = new Vector3(), v2 = new Vector3(), m4 = new Matrix4(), q = new Quaternion(), sc = new Vector3();
   const basePos = new Vector3(), baseQuat = new Quaternion(), appliedPos = new Vector3(), appliedQuat = new Quaternion();
   let shakeAmp = 0, shakeApplied = false;
+
+  const vapors = new Map<Vehicle, Vapor>();
+  const vaporList: Vapor[] = [];
+  const plasmas = new Map<Vehicle, Plasma>();
+  const plasmaList: Plasma[] = [];
+  const m3 = new Matrix3(), localFrom = new Vector3(), axis = new Vector3(), wq = new Quaternion(), yAxis = new Vector3(0, 1, 0);
+
+  const vaporFor = (vehicle: Vehicle): Vapor => {
+    let v = vapors.get(vehicle);
+    if (!v) {
+      const material = new ShaderMaterial({
+        uniforms: { uLevel: { value: 0 }, uTime: { value: 0 } },
+        vertexShader: VAPOR_VERT,
+        fragmentShader: VAPOR_FRAG,
+        transparent: true,
+        depthWrite: false,
+        side: DoubleSide,
+      });
+      const mesh = new Mesh(vaporGeometry, material);
+      mesh.renderOrder = 14;
+      v = { vehicle, mesh, material, level: 0, acc: 0 };
+      vapors.set(vehicle, v);
+      vaporList.push(v);
+    }
+    return v;
+  };
+
+  const plasmaFor = (vehicle: Vehicle): Plasma => {
+    let p = plasmas.get(vehicle);
+    if (!p) {
+      const uniforms = (): Record<string, { value: unknown }> => ({ uLevel: { value: 0 }, uTime: { value: 0 }, uFrom: { value: new Vector3() } });
+      const sheathMat = new ShaderMaterial({ uniforms: uniforms(), vertexShader: SHEATH_VERT, fragmentShader: SHEATH_FRAG, transparent: true, depthWrite: false, blending: AdditiveBlending });
+      const wakeMat = new ShaderMaterial({ uniforms: uniforms(), vertexShader: VAPOR_VERT, fragmentShader: WAKE_FRAG, transparent: true, depthWrite: false, blending: AdditiveBlending, side: DoubleSide });
+      const sheath = new Mesh(sheathGeometry, sheathMat);
+      const wake = new Mesh(wakeGeometry, wakeMat);
+      sheath.renderOrder = 15;
+      wake.renderOrder = 15;
+      wake.frustumCulled = false;
+      p = { vehicle, sheath, sheathMat, wake, wakeMat, level: 0, from: new Vector3(0, -1, 0), acc: 0 };
+      plasmas.set(vehicle, p);
+      plasmaList.push(p);
+    }
+    return p;
+  };
+
+  const updateVapor = (v: Vapor, dt: number): void => {
+    if (v.level <= 0) return;
+    const { vehicle } = v;
+    const y = vehicle.height * 0.75;
+    v.mesh.position.set(0, y, 0);
+    v.mesh.scale.set(vehicle.radius, vehicle.height * 0.45 * (0.6 + 0.4 * v.level), vehicle.radius);
+    v.material.uniforms.uLevel!.value = v.level;
+    v.material.uniforms.uTime!.value = time;
+    vehicle.object.updateWorldMatrix(true, false);
+    v.acc += dt * v.level * 45;
+    while (v.acc >= 1) {
+      v.acc -= 1;
+      const a = Math.random() * Math.PI * 2, r = vehicle.radius * (1.1 + Math.random() * 0.5);
+      fromVehicle(vehicle, Math.cos(a) * r, y - Math.random() * vehicle.height * 0.2, Math.sin(a) * r, Math.cos(a) * 0.3, -1, Math.sin(a) * 0.3, 8 + Math.random() * 8);
+      sp.delay = 0;
+      sp.life = 0.5 + Math.random() * 0.4;
+      sp.size0 = vehicle.radius * 0.8;
+      sp.size1 = vehicle.radius * 2;
+      colors(0.98, 0.99, 1, 0.95, 0.96, 0.98);
+      sp.alpha = 0.6 * v.level;
+      sp.drag = 1;
+      sp.lift = 0;
+      sp.fadeIn = 0.1;
+      sp.spin = (Math.random() - 0.5) * 2;
+      smoke.spawn(sp);
+    }
+  };
+
+  const updatePlasma = (p: Plasma, dt: number, camera: PerspectiveCamera): void => {
+    if (p.level <= 0) return;
+    const { vehicle } = p;
+    const H = vehicle.height, R = vehicle.radius;
+    vehicle.object.updateWorldMatrix(true, false);
+    p.sheath.position.set(0, H / 2, 0);
+    p.sheath.scale.set(R * 1.3, H * 0.56, R * 1.3);
+    m3.setFromMatrix4(camera.matrixWorldInverse);
+    const fromView = p.sheathMat.uniforms.uFrom!.value as Vector3;
+    fromView.copy(p.from).applyMatrix3(m3).normalize();
+    p.sheathMat.uniforms.uLevel!.value = p.level;
+    p.sheathMat.uniforms.uTime!.value = time;
+    p.wakeMat.uniforms.uLevel!.value = p.level;
+    p.wakeMat.uniforms.uTime!.value = time;
+    vehicle.object.getWorldQuaternion(wq);
+    axis.copy(yAxis).applyQuaternion(wq);
+    const sinA = axis.cross(p.from).length();
+    const perp = Math.max(R, 0.5 * H * sinA) * 1.15;
+    vehicle.object.localToWorld(p.wake.position.set(0, H / 2, 0));
+    p.wake.quaternion.setFromUnitVectors(yAxis, p.from);
+    p.wake.scale.set(perp, perp * (1.5 + 3 * p.level), perp);
+    localFrom.copy(p.from).applyQuaternion(wq.invert());
+    p.acc += dt * p.level * 140;
+    while (p.acc >= 1) {
+      p.acc -= 1;
+      let a = 0;
+      for (let k = 0; k < 6; k++) {
+        a = Math.random() * Math.PI * 2;
+        if (Math.sin(a) * localFrom.x + Math.cos(a) * localFrom.z > 0.2) break;
+      }
+      fromVehicle(vehicle, Math.sin(a) * R * 1.2, H * (0.05 + Math.random() * 0.9), Math.cos(a) * R * 1.2, -localFrom.x, -localFrom.y, -localFrom.z, 50 + Math.random() * 50);
+      sp.delay = 0;
+      sp.life = 0.35 + Math.random() * 0.35;
+      sp.size0 = 2 + Math.random() * 2;
+      sp.size1 = 5 + Math.random() * 4;
+      colors(1, 0.6, 0.4, 0.9, 0.22, 0.35);
+      sp.alpha = 0.6 * p.level;
+      sp.drag = 0.5;
+      sp.lift = 0;
+      sp.fadeIn = 0.1;
+      sp.spin = 0;
+      fire.spawn(sp);
+    }
+  };
 
   const plumeFor = (vehicle: Vehicle): Plume => {
     let p = plumes.get(vehicle);
@@ -558,7 +779,7 @@ export function createEffectsImpl(scene: Scene): Effects & { liveParticles(): nu
       dVel[i3 + 1] = dVel[i3 + 1]! - 14 * dt;
       const x = dPos[i3]! + dVel[i3]! * dt, z = dPos[i3 + 2]! + dVel[i3 + 2]! * dt;
       let y = dPos[i3 + 1]! + dVel[i3 + 1]! * dt;
-      const half = dSize[i3 + 1]! * 0.5 + 0.1;
+      const half = particleFloor.y + dSize[i3 + 1]! * 0.5 + 0.1;
       if (y < half) {
         y = half;
         dVel[i3 + 1] = Math.abs(dVel[i3 + 1]!) * 0.25;
@@ -719,9 +940,25 @@ export function createEffectsImpl(scene: Scene): Effects & { liveParticles(): nu
     shake(strength) {
       shakeAmp = Math.min(1, shakeAmp + Math.max(0, strength));
     },
+    setVapor(vehicle, level) {
+      const v = vaporFor(vehicle);
+      v.level = Math.max(0, Math.min(1, level));
+      if (v.mesh.parent !== vehicle.object) vehicle.object.add(v.mesh);
+      v.mesh.visible = v.level > 0;
+    },
+    setPlasma(vehicle, level, from) {
+      const p = plasmaFor(vehicle);
+      p.level = Math.max(0, Math.min(1, level));
+      p.from.copy(from).normalize();
+      if (p.sheath.parent !== vehicle.object) vehicle.object.add(p.sheath);
+      if (!p.wake.parent) scene.add(p.wake);
+      p.sheath.visible = p.wake.visible = p.level > 0;
+    },
     update(dt, camera) {
       time += dt;
       for (let i = 0; i < plumeList.length; i++) updatePlume(plumeList[i]!, dt);
+      for (let i = 0; i < vaporList.length; i++) updateVapor(vaporList[i]!, dt);
+      for (let i = 0; i < plasmaList.length; i++) updatePlasma(plasmaList[i]!, dt, camera);
       emitSteam(dt);
       updateDebris(dt);
       smoke.update(dt);
@@ -734,6 +971,17 @@ export function createEffectsImpl(scene: Scene): Effects & { liveParticles(): nu
         p.fireAcc = 0;
         p.smokeAcc = 0;
         p.group.removeFromParent();
+      }
+      for (const v of vaporList) {
+        v.level = 0;
+        v.acc = 0;
+        v.mesh.removeFromParent();
+      }
+      for (const p of plasmaList) {
+        p.level = 0;
+        p.acc = 0;
+        p.sheath.removeFromParent();
+        p.wake.removeFromParent();
       }
       steam = 0;
       steamAcc = 0;

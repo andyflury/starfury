@@ -1,6 +1,6 @@
 import { createAudioGraph } from '../src/audio/index.ts';
 import lines from '../src/audio/lines.json';
-import type { LineId } from '../src/types.ts';
+import type { Language, LineId } from '../src/types.ts';
 
 const EFFECTS = ['explosion', 'tick', 'clank', 'fail', 'success', 'star', 'stop'] as const;
 type Effect = (typeof EFFECTS)[number];
@@ -69,14 +69,17 @@ function toneWav(freq: number, seconds: number): Response {
   return new Response(view.buffer, { headers: { 'Content-Type': 'audio/wav' } });
 }
 
-// `?tones` answers the first two lines' requests with test tones (0.8 s and 0.5 s) instead of the MP3s.
-if (new URLSearchParams(location.search).has('tones')) {
-  const [a, b] = Object.keys(lines);
+// Counts voice requests; `?tones` answers the first line's request with a test tone (de 0.8 s, en 0.5 s) instead of the MP3.
+const requests: string[] = [];
+{
+  const [first] = Object.keys(lines);
+  const tones = new URLSearchParams(location.search).has('tones');
   const realFetch = window.fetch.bind(window);
   window.fetch = (input, init) => {
     const url = String(input);
-    if (url.endsWith(`/${a}.mp3`)) return Promise.resolve(toneWav(440, 0.8));
-    if (url.endsWith(`/${b}.mp3`)) return Promise.resolve(toneWav(660, 0.5));
+    if (url.includes('/voice/')) requests.push(url);
+    if (tones && url.endsWith(`/voice/de/${first}.mp3`)) return Promise.resolve(toneWav(440, 0.8));
+    if (tones && url.endsWith(`/voice/en/${first}.mp3`)) return Promise.resolve(toneWav(660, 0.5));
     return realFetch(input, init);
   };
 }
@@ -90,6 +93,8 @@ Object.assign(window, {
       peak = 0;
     },
     offline,
+    requests,
+    setLanguage,
     effects: EFFECTS,
   },
 });
@@ -113,18 +118,32 @@ slider.addEventListener('input', () => {
 });
 
 document.getElementById('stopVoice')!.addEventListener('click', () => audio.voice.stop());
+let language: Language = 'de';
 const lineList = document.getElementById('lines')!;
+const wraps = new Map<LineId, HTMLElement>();
 for (const [id, line] of Object.entries(lines)) {
   const wrap = document.createElement('span');
   wrap.className = 'line';
-  wrap.title = line.text;
+  wrap.title = line[language];
   for (const mode of ['say', 'queue'] as const) {
     const button = document.createElement('button');
     button.textContent = `${mode} ${id}`;
     button.addEventListener('click', () => void audio.voice[mode](id as LineId));
     wrap.append(button);
   }
+  wraps.set(id as LineId, wrap);
   lineList.append(wrap);
 }
 
-void audio.voice.load();
+/** Reloads the voice in `next` and relabels every line button with its text in that language. */
+function setLanguage(next: Language): Promise<void> {
+  language = next;
+  for (const [id, wrap] of wraps) wrap.title = lines[id][next];
+  for (const button of document.querySelectorAll<HTMLButtonElement>('#language button')) button.disabled = button.dataset.language === next;
+  return audio.voice.load(next);
+}
+
+for (const button of document.querySelectorAll<HTMLButtonElement>('#language button')) {
+  button.addEventListener('click', () => void setLanguage(button.dataset.language as Language));
+}
+void setLanguage('de');

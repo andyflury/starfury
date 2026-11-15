@@ -245,18 +245,30 @@ describe('climb', () => {
     expect(clear).toBeLessThan(climb - 5);
   });
 
-  it('leans the way the stick is pushed: right on screen, and up away from the camera', () => {
+  it('leans the way the stick is pushed, in the frame of the screen tilt: right raises right, up raises away', () => {
     const right = toIgnition();
     right.input.throttle = 1;
     right.input.stickX = 1;
     right.run(0.5);
-    expect(screenTiltOf(right.s)).toBeGreaterThan(4);
+    expect(screenTiltOf(right.s).right).toBeGreaterThan(4);
+    expect(Math.abs(screenTiltOf(right.s).away)).toBeLessThan(0.5);
     const up = toIgnition();
     up.input.throttle = 1;
     up.input.stickY = 1;
     up.run(0.5);
-    expect(Math.abs(screenTiltOf(up.s))).toBeLessThan(0.5);
-    expect(up.s.tiltX * SIN + up.s.tiltZ * COS).toBeLessThan(-4);
+    expect(Math.abs(screenTiltOf(up.s).right)).toBeLessThan(0.5);
+    expect(screenTiltOf(up.s).away).toBeGreaterThan(4);
+  });
+
+  it('splits the whole tilt into its two screen parts', () => {
+    const r = toIgnition(3).run(30, (x) => {
+      throttleUp(0)(x);
+      x.input.stickX = Math.sin(x.t);
+      x.input.stickY = Math.cos(x.t * 0.7);
+      const { right, away } = screenTiltOf(x.s);
+      expect(Math.hypot(right, away)).toBeCloseTo(tiltOf(x.s), 9);
+    });
+    expect(r.s.maxTilt).toBeGreaterThan(1);
   });
 
   it('tilts over by itself in the wind, away from the tower, sometimes as far as a crash', () => {

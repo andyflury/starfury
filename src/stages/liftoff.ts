@@ -1,7 +1,7 @@
 import { Quaternion, Vector3 } from 'three';
 import { LIFTOFF } from '../tuning.ts';
 import type { HintIcon, LineId, Stage, StageFactory, StageResult } from '../types.ts';
-import { createLiftoff, type LiftoffEvent, type LiftoffSite, type LiftoffState, poseOf, screenTiltOf, stepLiftoff, tiltOf } from './liftoffSim.ts';
+import { createLiftoff, type LiftoffEvent, type LiftoffSite, type LiftoffState, poseOf, screenTiltOf, stepLiftoff } from './liftoffSim.ts';
 
 /** Camera distance from the stack on the pad, and the fraction of it left after the countdown's push-in. */
 const PAD_DISTANCE = 240;
@@ -123,7 +123,7 @@ export const createLiftoffStage: StageFactory = (app) => {
         enginesOff();
         effects.shake(1);
         sfx.explosion();
-        void voice.say('crash');
+        void voice.say('crash_rocket');
         end({ outcome: 'fail', stars: 0 });
         break;
       }
@@ -159,7 +159,10 @@ export const createLiftoffStage: StageFactory = (app) => {
     if (s.phase === 'throttleDown') hud.setThrottle(throttle);
     else if (s.phase === 'ignition' || s.phase === 'climb') hud.setThrottle(throttle, LIFTOFF.liftoffBand);
     else hud.setThrottle(undefined);
-    hud.setTilt(s.phase === 'climb' ? Math.sign(screenTiltOf(s) || 1) * tiltOf(s) : undefined, LIFTOFF.crashTilt);
+    if (s.phase === 'climb') {
+      const { right, away } = screenTiltOf(s);
+      hud.setTilt(right, away, LIFTOFF.crashTilt * LIFTOFF.warnFraction, LIFTOFF.crashTilt);
+    } else hud.setTilt(undefined);
     const fade = Math.min(1, Math.max(0, (s.altitude - STEAM_FADE[0]) / (STEAM_FADE[1] - STEAM_FADE[0])));
     effects.setPadSteam(s.steam * (1 - fade));
     if (!burning) return;

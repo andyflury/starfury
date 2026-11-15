@@ -1,10 +1,12 @@
-import type { Stars } from './types.ts';
+import type { Language, Stars } from './types.ts';
 
 /** Everything the game keeps in `localStorage`, each under `starfury.<key>`. */
 export interface Stored {
   /** The controller mapping, shaped by `input/mapping.ts`. */
   mapping: unknown;
   name: string;
+  /** The language the voice speaks. */
+  language: Language;
   /** Best stars per scored stage, by the stage's id. */
   best: Record<string, Stars>;
 }
